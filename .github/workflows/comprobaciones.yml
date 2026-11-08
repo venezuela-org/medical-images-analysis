@@ -17,16 +17,20 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
       - run: uv run --with pytest --with pydicom --with numpy --with fastapi --with uvicorn --with pillow --with nibabel pytest -q pruebas
 
   suv:
     name: Validación IBSI-SUV (58 objetos de referencia públicos)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
       - name: Descargar los objetos de referencia (oncoray/suv_computation)
         run: |
           curl -sL -o ref.zip https://codeload.github.com/oncoray/suv_computation/zip/refs/heads/main
