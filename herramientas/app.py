@@ -444,7 +444,7 @@ def empaquetar(request: Request, cuerpo: dict):
                     dirs.remove(d)
             for n in sorted(nombres):
                 a = Path(raiz) / n
-                rel = str(a.relative_to(limpios))
+                rel = a.relative_to(limpios).as_posix()   # el zip y el manifiesto usan '/', también en Windows
                 if a.is_symlink():
                     fallos[rel] = ["enlace simbólico / symlink"]
                     continue

@@ -67,7 +67,8 @@ def correr_gancho(r: Path) -> tuple[int, str]:
             pytest.skip("sin bash de Git para ejecutar el gancho")
         cmd = [bash, GANCHO.as_posix() if platform.system() != "Windows" else str(GANCHO)]
     p = subprocess.run(cmd, cwd=r, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    informe = (f"\ncomando: {cmd}\nbash: {bash}\ngancho: {GANCHO} (CR en el archivo: {GANCHO.read_bytes().count(b'\\r')})\n"
+    retornos = GANCHO.read_bytes().count(b"\r")      # fuera del f-string: compatible con Python 3.10 y cuenta CR de verdad
+    informe = (f"\ncomando: {cmd}\nbash: {bash}\ngancho: {GANCHO} (CR en el archivo: {retornos})\n"
                f"código: {p.returncode}\nstdout:\n{p.stdout}\nstderr:\n{p.stderr}")
     return p.returncode, informe
 

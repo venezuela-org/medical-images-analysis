@@ -115,6 +115,7 @@ def main() -> int:
         zpath = Path(paq["ruta"])
         with zipfile.ZipFile(zpath) as z:
             nombres = z.namelist()
+            ok(len(nombres) == len(set(nombres)), "el zip no tiene entradas repetidas")
             ok(all(n.endswith(".dcm") or n == "manifiesto.json" for n in nombres), "el zip solo contiene DICOM limpios y manifiesto.json")
             ok(not any(any(p in n for p in PRIVADOS) for n in nombres), "ningún archivo privado dentro del zip")
             manifiesto = json.loads(z.read("manifiesto.json"))

@@ -6,7 +6,8 @@ What may enter release attachments, checked by content, not by file name.
 Reglas / Rules
   - Ningún archivo dentro de ningún adjunto puede ser un DICOM (marcador DICM en el byte 128), con una sola excepción:
     los archivos de datos-demo-sinteticos.zip, donde cada DICOM debe llevar la identidad sintética de demo.py
-    (nombre DEMO^PACIENTE^SINTETICO, fabricante DEMO SINTETICA) y ninguna etiqueta privada ajena a la demo.
+    (nombre DEMO^PACIENTE^SINTETICO, fabricante DEMO SINTETICA) y ninguna etiqueta privada distinta de las dos que
+    escribe demo.py, en ningún nivel del dataset. Las entradas repetidas del zip se rechazan.
     El paquete de la aplicación no lleva ningún DICOM: ni datos de prueba ni paletas de las dependencias.
   - Ningún archivo puede llamarse como los archivos privados del proyecto (mapa de seudónimos, índice de
     originales, raíces, corridas, revisiones de píxeles, bitácora) ni ser un paquete de exportación.
@@ -34,6 +35,8 @@ except ImportError:  # sin pydicom no se puede validar la demo: se rechaza, nunc
 
 PRIVADOS = re.compile(r"(mapa_seudonimos|indice_origen|raices\.json|corridas\.jsonl|revision_pixeles|registro\.log|(?:^|[/\\])PRIVADO(?:[/\\]|$)|limpios_PRIVADO|paquete_\d{8}_)", re.I)
 DEMO_NOMBRE, DEMO_FABRICANTE, DEMO_CREADOR = b"DEMO^PACIENTE^SINTETICO", b"DEMO SINTETICA", b"DEMO PRIVADO"
+# Las únicas etiquetas privadas que escribe demo.py: creador y un valor de demostración. Cualquier otra es ajena.
+PRIVADAS_DEMO = {(0x00090010, "DEMO PRIVADO"), (0x00091001, "valor privado de demostracion")}
 
 
 def es_dicom(datos: bytes) -> bool:
@@ -44,12 +47,16 @@ def revisar_zip(ruta: Path) -> list[str]:
     problemas: list[str] = []
     es_demo = ruta.name.startswith("datos-demo-sinteticos")
     with zipfile.ZipFile(ruta) as z:
+        nombres = [i.filename for i in z.infolist() if not i.is_dir()]
+        repetidos = sorted({n for n in nombres if nombres.count(n) > 1})
+        for n in repetidos:
+            problemas.append(f"{ruta.name}: entrada repetida en el zip (una puede ocultar a la otra): {n}")
         for info in z.infolist():
             if info.is_dir():
                 continue
             if PRIVADOS.search(info.filename):
                 problemas.append(f"{ruta.name}: nombre de archivo privado o paquete de exportación: {info.filename}")
-            datos = z.read(info.filename)
+            datos = z.read(info)                 # por objeto ZipInfo: cada entrada con sus propios bytes, aunque el nombre se repita
             if es_dicom(datos):
                 if not es_demo:
                     problemas.append(f"{ruta.name}: contiene un DICOM: {info.filename}")
@@ -65,9 +72,9 @@ def revisar_zip(ruta: Path) -> list[str]:
                     continue
                 if str(ds.get("PatientName", "")) != DEMO_NOMBRE.decode() or str(ds.get("Manufacturer", "")) != DEMO_FABRICANTE.decode():
                     problemas.append(f"{ruta.name}: DICOM sin la identidad sintética exacta de la demo: {info.filename}")
-                creadores = {str(e.value).strip() for e in ds.iterall() if e.tag.is_private and e.tag.element < 0x100}
-                if creadores - {DEMO_CREADOR.decode()}:
-                    problemas.append(f"{ruta.name}: DICOM con creadores privados ajenos a la demo: {info.filename}")
+                privadas = {(int(e.tag), str(e.value).strip()) for e in ds.iterall() if e.tag.is_private}
+                if privadas - PRIVADAS_DEMO:
+                    problemas.append(f"{ruta.name}: DICOM con etiquetas privadas ajenas a la demo: {info.filename}")
     return problemas
 
 
