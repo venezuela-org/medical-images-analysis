@@ -1,0 +1,13 @@
+# Finales de línea: los scripts de shell y los ganchos deben quedar en LF también en Windows, o bash no los ejecuta.
+* text=auto
+*.py text eol=lf
+*.sh text eol=lf
+*.command text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+.githooks/* text eol=lf
+*.bat text eol=crlf
+*.dcm binary
+*.zip binary
+*.png binary
