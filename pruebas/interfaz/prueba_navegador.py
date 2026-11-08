@@ -2,6 +2,9 @@
 """
 Prueba de interfaz en navegador real (Playwright + Chromium), con el caso sintético: selección de fila, deslizador,
 panel antes/después, botones de comprobación, formulario de revisión y Enviar. Guarda capturas de cada pestaña.
+Usa localizadores y aserciones con reintento (expect): las filas se vuelven a pintar al refrescar el inventario, así
+que nunca se guardan ElementHandles; se afirma el estado final de la serie y el corte elegidos, nunca un estado
+transitorio de carga.
 
 Browser test with the synthetic case; saves screenshots. Runs in CI (Linux); needs `playwright install chromium`.
 
@@ -54,63 +57,83 @@ def main() -> int:
                 fallos.append(msg)
 
         with sync_playwright() as pw:
+            from playwright.sync_api import expect
+            expect.set_options(timeout=15000)
             nav = pw.chromium.launch()
             pag = nav.new_page(viewport={"width": 1366, "height": 800}, device_scale_factor=1, bypass_csp=True)  # la CSP de la app bloquea eval; Playwright lo necesita para sus propias evaluaciones
             pag.goto(f"http://127.0.0.1:{a.puerto}/?t={token}")
-            pag.wait_for_selector("#trabajo")
+            expect(pag.locator("#trabajo")).not_to_be_empty()
             pag.click("#btn-demo")
-            pag.wait_for_function("document.querySelector('#origen').value.length > 0", timeout=60000)
+            expect(pag.locator("#origen")).not_to_have_value("", timeout=60000)
             pag.screenshot(path=str(destino / f"{a.etiqueta}-1-entrada.png"))
             pag.click("#btn-anonimizar")
-            pag.wait_for_function("document.querySelector('#estado-anon').textContent.includes('Limpieza terminada')", timeout=120000)
+            expect(pag.locator("#estado-anon")).to_contain_text("Limpieza terminada", timeout=120000)
             pag.screenshot(path=str(destino / f"{a.etiqueta}-1-entrada-terminada.png"))
 
+            # Localizadores, no ElementHandles: las filas se vuelven a pintar al refrescar el inventario.
             pag.click("nav.pestanas button[data-tab=estudios]")
-            pag.wait_for_selector("#tabla-series tbody tr.fila-serie")
-            filas = pag.query_selector_all("#tabla-series tbody tr.fila-serie")
-            ok(len(filas) == 2, f"inventario con 2 series ({len(filas)})")
-            # selección: la fila elegida queda marcada y distinta de las demás
-            pt = next(f for f in filas if "PT" in f.inner_text())
-            pt.click()
-            pag.wait_for_selector("#visor:not(.oculto)")
-            ok("seleccionada" in (pt.get_attribute("class") or ""), "la fila PT seleccionada lleva la clase 'seleccionada'")
-            ok(sum(1 for f in pag.query_selector_all("tr.fila-serie.seleccionada")) == 1, "una sola fila seleccionada")
-            # deslizador: cambia la imagen y el panel antes/después sigue a la selección
-            src1 = pag.get_attribute("#corte", "src")
+            filas = pag.locator("#tabla-series tbody tr.fila-serie")
+            expect(filas).to_have_count(2)
+            ok(True, "inventario con 2 series")
+            modalidad = lambda m: filas.filter(has=pag.locator("td:nth-child(4)", has_text=re.compile(rf"^{m}$")))
+            fila_pt, fila_ct = modalidad("PT"), modalidad("CT")
+            expect(fila_pt).to_have_count(1)
+            expect(fila_ct).to_have_count(1)
+
+            # selección: la fila elegida queda marcada, y solo ella
+            fila_pt.click()
+            expect(pag.locator("#visor")).not_to_have_class(re.compile(r"\boculto\b"))
+            expect(fila_pt).to_have_class(re.compile(r"\bseleccionada\b"))
+            expect(pag.locator("tr.fila-serie.seleccionada")).to_have_count(1)
+            ok(True, "la fila PT seleccionada lleva la clase 'seleccionada' y es la única")
+            id_pt = fila_pt.get_attribute("data-id")
+
+            # deslizador: la imagen y el panel antes/después pasan al corte 2 de esta serie
             pag.eval_on_selector("#deslizador", "el => { el.value = 2; el.dispatchEvent(new Event('input', {bubbles: true})); }")
-            pag.wait_for_function(f"document.querySelector('#corte').src !== {json.dumps(src1)}")
-            pag.wait_for_function("document.querySelector('#destacados').children.length > 0", timeout=30000)
-            ok("/corte/2?" in (pag.get_attribute("#corte", "src") or ""), "el deslizador cambia el corte mostrado")
-            ok("/corte_original/2?" in (pag.get_attribute("#img-original", "src") or ""), "el panel antes/después muestra el mismo corte")
-            ok("idénticos" in pag.inner_text("#destacados"), "las tarjetas dicen que los bytes de PixelData son idénticos")
-            # cambiar de serie limpia el panel y la selección sigue a la nueva fila
-            ct = next(f for f in pag.query_selector_all("#tabla-series tbody tr.fila-serie") if "CT" in f.inner_text())
-            ct.click()
-            pag.wait_for_function("document.querySelector('#antes-despues').classList.contains('oculto') || document.querySelector('#destacados').children.length === 0")
-            ok("seleccionada" in (ct.get_attribute("class") or ""), "al elegir la serie CT la marca de selección cambia de fila")
+            expect(pag.locator("#corte")).to_have_attribute("src", re.compile(rf"/serie/{re.escape(id_pt)}/corte/2\?"))
+            expect(pag.locator("#img-limpio")).to_have_attribute("src", re.compile(rf"/serie/{re.escape(id_pt)}/corte/2\?"), timeout=30000)
+            expect(pag.locator("#img-original")).to_have_attribute("src", re.compile(rf"/serie/{re.escape(id_pt)}/corte_original/2\?"), timeout=30000)
+            expect(pag.locator("#destacados")).to_contain_text("idénticos", timeout=30000)
+            ok(True, "el deslizador cambia el corte y el panel antes/después muestra el mismo corte de la misma serie, con PixelData idéntico")
+
+            # cambiar de serie: la marca pasa a la fila CT y el visor muestra la serie CT
+            fila_ct.click()
+            expect(fila_ct).to_have_class(re.compile(r"\bseleccionada\b"))
+            expect(fila_pt).not_to_have_class(re.compile(r"\bseleccionada\b"))
+            id_ct = fila_ct.get_attribute("data-id")
+            expect(pag.locator("#corte")).to_have_attribute("src", re.compile(rf"/serie/{re.escape(id_ct)}/corte/\d+\?"))
+            expect(pag.locator("#destacados")).to_contain_text("idénticos", timeout=30000)
+            expect(pag.locator("#img-original")).to_have_attribute("src", re.compile(rf"/serie/{re.escape(id_ct)}/corte_original/"), timeout=30000)
+            ok(True, "al elegir la serie CT la selección, el visor y el panel antes/después pertenecen a la serie CT")
+
             # comprobaciones
             pag.click("#botones-comprobar button[data-que=emparejar]")
-            pag.wait_for_function("document.querySelector('#salida-comprobar').textContent.includes('CANDIDATO')", timeout=60000)
+            expect(pag.locator("#salida-comprobar")).to_contain_text("CANDIDATO COMPATIBLE", timeout=60000)
             ok(True, "botón Emparejar muestra la salida")
-            # revisión: botones deshabilitados hasta tener revisor; contradicción bloqueada
-            ok(pag.is_disabled("#rev-sin") and pag.is_disabled("#rev-con"), "botones de revisión deshabilitados sin revisor")
+
+            # revisión: botones deshabilitados hasta tener revisor; combinación contradictoria bloqueada
+            expect(pag.locator("#rev-sin")).to_be_disabled()
+            expect(pag.locator("#rev-con")).to_be_disabled()
             pag.fill("#rev-revisor", "prueba")
             pag.check("#rev-rostro")
-            ok(pag.is_disabled("#rev-sin") and not pag.is_disabled("#rev-con"), "con un hallazgo marcado solo se habilita 'con hallazgos'")
+            expect(pag.locator("#rev-sin")).to_be_disabled()
+            expect(pag.locator("#rev-con")).to_be_enabled()
             pag.uncheck("#rev-rostro")
-            ok(not pag.is_disabled("#rev-sin") and pag.is_disabled("#rev-con"), "sin hallazgos marcados solo se habilita 'sin hallazgos'")
+            expect(pag.locator("#rev-sin")).to_be_enabled()
+            expect(pag.locator("#rev-con")).to_be_disabled()
+            ok(True, "botones de revisión: deshabilitados sin revisor; con un hallazgo solo 'con hallazgos'; sin hallazgos solo 'sin hallazgos'")
             pag.click("#rev-sin")
-            pag.wait_for_function("document.querySelector('#rev-estado').textContent.includes('Lista para compartir')", timeout=30000)
+            expect(pag.locator("#rev-estado")).to_contain_text("Lista para compartir", timeout=30000)
             ok(True, "revisión sin hallazgos registrada y vigente")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-2-estudios.png"), full_page=True)
 
             pag.click("nav.pestanas button[data-tab=enviar]")
-            pag.wait_for_selector("#lista-pacientes label")
-            pag.wait_for_function("document.querySelector('#lista-pacientes').textContent.includes('revisión de píxeles')", timeout=30000)
+            expect(pag.locator("#lista-pacientes")).to_contain_text("revisión de píxeles vigente", timeout=30000)
             pag.check("#lista-pacientes input[type=checkbox]")
             pag.click("#btn-empaquetar")
-            pag.wait_for_function("document.querySelector('#estado-enviar').textContent.includes('Paquete creado')", timeout=120000)
-            ok("vigente" in pag.inner_text("#estado-enviar"), "Enviar distingue el paquete con revisión vigente")
+            expect(pag.locator("#estado-enviar")).to_contain_text("Paquete creado", timeout=120000)
+            expect(pag.locator("#estado-enviar")).to_contain_text("vigente")
+            ok(True, "Enviar distingue el paquete con revisión vigente")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-3-enviar.png"), full_page=True)
             nav.close()
         print(f"capturas en {destino}")
