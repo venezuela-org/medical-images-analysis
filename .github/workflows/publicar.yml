@@ -1,8 +1,10 @@
 # Publicación: al empujar una etiqueta vX.Y.Z se ejecutan las pruebas, se construyen los paquetes de escritorio
-# para Windows y macOS con PyInstaller, se les hace una prueba de humo en el propio runner (herramientas por
-# subcomando, servidor local, importación del caso sintético, comparación SUV y empaquetado) y se crea un
-# borrador de GitHub Release con los paquetes, las instrucciones, las notas de la versión y el caso sintético.
-# El borrador se publica a mano tras la prueba en Windows 10 y macOS reales.
+# para Windows y macOS con PyInstaller, se les hace una prueba de humo por la API en el propio runner (servidor
+# local, caso sintético, importación, comprobaciones, revisión de píxeles, exportación y verificación del paquete
+# resultante), se comprueban los adjuntos por contenido y se crea un borrador de GitHub Release con los paquetes,
+# las instrucciones, las notas de la versión y el caso sintético. El borrador se publica a mano tras la prueba en
+# Windows 10 y macOS reales. La comprobación de adjuntos demuestra que no hay DICOM fuera de la demo ni archivos
+# privados conocidos; no sustituye la revisión manual.
 #
 # Release on tag vX.Y.Z: tests, PyInstaller packages for Windows and macOS, smoke test on each runner, and a
 # DRAFT GitHub Release with packages, instructions, release notes and the synthetic demo case.
@@ -45,25 +47,13 @@ jobs:
       - name: Construir con PyInstaller
         shell: bash
         run: bash herramientas/empaquetar.sh
-      - name: Prueba de humo del ejecutable (herramientas, servidor, importación sintética, SUV, paquete)
+      - name: Prueba de humo por la API (importación, comprobaciones, revisión, exportación y verificación del paquete)
         shell: bash
         run: |
-          set -euo pipefail
           B="herramientas/dist/PET-CT local/PET-CT local"
           [ -f "$B.exe" ] && B="$B.exe"
           "$B" --version
-          "$B" herramienta demo humo/originales/DEMO
-          "$B" herramienta anonimizar limpiar humo/originales/DEMO humo/limpios
-          "$B" herramienta cotejar humo/originales/DEMO humo/limpios | tail -1 | grep -q COINCIDE
-          "$B" herramienta emparejar humo/limpios/ANON-0001 | grep -q "CANDIDATO COMPATIBLE"
-          S=$(find humo/limpios -type d -name 'serie_*PT*' | head -1)
-          "$B" herramienta suv comparar "$S" | grep -q "Veredicto: IDENTICO"
-          "$B" --trabajo humo/app --puerto 8765 --sin-navegador > servidor.log 2>&1 &
-          for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8765/static/app.js && break; sleep 1; done
-          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/static/app.js | grep -q 200
-          T=$(grep -o 't=[A-Za-z0-9_-]*' servidor.log | head -1 | cut -c3-)
-          curl -s -o /dev/null -w "%{http_code}\n" -H "X-Token: $T" http://127.0.0.1:8765/api/estado | grep -q 200
-          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/api/estado | grep -q 401
+          uv run --with pydicom python pruebas/humo_paquete.py --binario "$B" --puerto 8765
       - name: Añadir instrucciones y lanzador al paquete
         shell: bash
         run: |
@@ -108,11 +98,11 @@ jobs:
         with:
           merge-multiple: true
           path: adjuntos
-      - name: Ningún adjunto puede contener DICOM reales ni archivos privados
-        run: |
-          cd adjuntos && for z in *.zip; do
-            unzip -l "$z" | grep -Ei "mapa_seudonimos|indice_origen|raices.json|corridas.jsonl|revision_pixeles|paquete_[0-9]" && { echo "adjunto con archivos privados: $z"; exit 1; } || true
-          done
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Adjuntos comprobados por contenido (ningún DICOM fuera de la demo sintética, ningún archivo privado)
+        run: uv run --with pydicom python pruebas/comprobar_adjuntos.py adjuntos/*.zip
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

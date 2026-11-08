@@ -1,4 +1,4 @@
-# PET/CT local 0.7.0
+# PET/CT local 0.7.1
 
 Herramientas locales para el proyecto de segmentación PET/CT: un anonimizador DICOM con política versionada (`anonimizar.py`) y una aplicación que corre en tu propia computadora para limpiar, revisar y empaquetar estudios (`app.py`). Nada identificable sale de la máquina donde están los originales.
 
