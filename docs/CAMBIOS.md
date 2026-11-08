@@ -213,3 +213,10 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 | 3 | Dos entradas del zip con el mismo nombre: la segunda ocultaba a la primera | Lectura por `ZipInfo` y rechazo de entradas repetidas, en el comprobador y en la prueba de humo | `test_entrada_repetida_se_rechaza` |
 | 4 | Solo se validaban los creadores privados de la demo | Todas las etiquetas privadas del dataset deben ser las dos que escribe `demo.py` | `test_demo_con_etiqueta_privada_ajena_se_rechaza` |
 | + | Pruebas de los adjuntos | `pruebas/test_adjuntos.py`, seis zips sintéticos: demo limpia aceptada; DICOM en el paquete, carpeta privada en la raíz o con `\`, entrada repetida, etiqueta privada ajena e identidad distinta rechazados | 33 pruebas en la suite |
+
+# Cambios 0.7.2 / Changes 0.7.2
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| macOS: "Python.framework está dañado" en un Mac real | La descarga lleva la marca de cuarentena y Gatekeeper bloquea las bibliotecas del paquete. El lanzador `Abrir PET-CT local.command` quita la cuarentena de su carpeta antes de arrancar (`xattr -dr com.apple.quarantine .`) y el flujo firma ad hoc cada binario (`.dylib`, `.so`, frameworks y ejecutable). Instrucciones con el remedio manual por Terminal | Pendiente de prueba en el Mac de Arturo con el paquete v0.7.2 |
+| Python fijo en los paquetes | `empaquetar.sh` usa Python 3.12 en vez del más reciente del runner (macOS había construido con 3.15) | Construcción en Linux con 3.12 y prueba de humo por API en verde |
