@@ -1,0 +1,23 @@
+# Prueba de interfaz en navegador real con el caso sintético, y capturas de pantalla como artefacto.
+# Browser test (Playwright + Chromium) with the synthetic case; screenshots uploaded as an artifact.
+name: interfaz
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  navegador:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - run: uv run --with playwright python -m playwright install --with-deps chromium
+      - run: uv run --with playwright --with fastapi --with uvicorn --with pydicom --with numpy --with pillow --with nibabel python pruebas/interfaz/prueba_navegador.py --capturas capturas --etiqueta despues
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capturas-interfaz
+          path: capturas/

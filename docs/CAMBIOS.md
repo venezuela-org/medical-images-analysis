@@ -191,3 +191,25 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 | 1 | La prueba de orden elegía un corte cualquiera; si tocaba un extremo, el orden seguía válido y la prueba fallaba sin motivo | La prueba elige el corte del medio por posición física y rompe el orden a propósito | Suite ejecutada tres veces: 25 de 25 cada vez |
 | 2 | La geometría solo se exigía en conjunto: un par sin ImagePositionPatient pasaba si otros la traían | Cada par debe traer posición, orientación y espaciado en ambos lados; el conteo `geometria_incompleta` forma parte del resultado de orden y geometría | Un solo corte sin posición → DIFERENCIAS con correspondencia completa; todos sin posición → DIFERENCIAS |
 | 3 | Un problema de orden también marcaba como incompleta la correspondencia | Tres resultados independientes: correspondencia (inventario), orden y geometría, igualdad numérica; cada problema se imprime bajo su apartado y el veredicto exige los tres | Orden incoherente en ambos lados: correspondencia sí, orden NO, píxeles sí, DIFERENCIAS |
+
+## Revisión del PR #1 (Copilot) y runner de Windows
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | El gancho llegaba con CRLF al runner de Windows (20 retornos de carro); la prueba nueva lo mostró | `.gitattributes` añadido a la rama (`.githooks/* text eol=lf`); la prueba de CR sigue vigilándolo | `test_el_gancho_no_tiene_retornos_de_carro` |
+| 2 | "Lista para compartir" solo acreditaba la revisión de píxeles | El mensaje dice "sin hallazgos, vigente" y que la compuerta se vuelve a comprobar al empaquetar | Prueba de navegador actualizada |
+| 3 | El patrón de archivos privados no detectaba `PRIVADO/` en la raíz del zip ni separadores de Windows | Límites de componente en el patrón | Zip con `PRIVADO/secreto.json` en la raíz, rechazado |
+| 4 | La identidad de la demo se buscaba en los bytes; creadores privados solo al nivel superior | Valores exactos de PatientName y Manufacturer y recorrido completo del dataset | DICOM ajeno colado en la demo, rechazado |
+| 5 | Sin pydicom el comprobador aceptaba en silencio | pydicom obligatorio: sin él, rechaza con código 2 | Simulado sin pydicom: código 2 |
+| 6 | El manifiesto podía omitir DICOM del zip | La prueba de humo exige que las rutas del manifiesto sean exactamente los DICOM del zip, sin repetidos | Prueba de humo, 39 comprobaciones |
+| 7 | Contraste de `--tinta-3` bajo el mínimo en claro y en oscuro | `#6b6b66` (claro) y `#9a9a93` (oscuro) | |
+
+## Revisión del PR #1, segunda ronda
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | En Windows el exportador escribía rutas con `\` en el manifiesto y el zip las guardaba con `/`: la relectura fallaba | Rutas POSIX en el zip y en el manifiesto | Prueba de humo contra el ejecutable: el manifiesto enumera exactamente las entradas del zip |
+| 2 | Conteo de retornos de carro dentro de un f-string: error de sintaxis en Python 3.10 y 3.11, y contaba los bytes equivocados | Conteo fuera del f-string con el byte correcto | Sin f-strings con barras en el archivo |
+| 3 | Dos entradas del zip con el mismo nombre: la segunda ocultaba a la primera | Lectura por `ZipInfo` y rechazo de entradas repetidas, en el comprobador y en la prueba de humo | `test_entrada_repetida_se_rechaza` |
+| 4 | Solo se validaban los creadores privados de la demo | Todas las etiquetas privadas del dataset deben ser las dos que escribe `demo.py` | `test_demo_con_etiqueta_privada_ajena_se_rechaza` |
+| + | Pruebas de los adjuntos | `pruebas/test_adjuntos.py`, seis zips sintéticos: demo limpia aceptada; DICOM en el paquete, carpeta privada en la raíz o con `\`, entrada repetida, etiqueta privada ajena e identidad distinta rechazados | 33 pruebas en la suite |
