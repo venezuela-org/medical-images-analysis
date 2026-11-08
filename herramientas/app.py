@@ -87,7 +87,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -970,6 +970,7 @@ function abrir(s) {
   $('#antes-despues').classList.add('oculto'); $('#img-original').removeAttribute('src'); $('#img-limpio').removeAttribute('src'); $('#destacados').textContent = ''; $('#detalle-cambios').textContent = ''; texto('#ad-estado', '');
   $('#salida-comprobar').classList.add('oculto'); texto('#salida-comprobar', '');
   $('#ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
+  document.querySelectorAll('#botones-comprobar button[data-que=suv], #botones-comprobar button[data-que=comparar_suv]').forEach(b => { b.disabled = s.modalidad !== 'PT'; b.title = s.modalidad === 'PT' ? '' : 'Solo para series PET: elige la serie PT de este paciente'; });
   const m = $('#meta'); m.textContent = '';
   for (const [k, v] of [['Paciente', s.paciente], ['Estudio', s.estudio], ['Serie', s.serie], ['Modalidad', s.modalidad], ['Descripción', s.descripcion], ['Protocolo', s.protocolo],
        ['Matriz', s.filas + '×' + s.columnas], ['Espaciado (mm)', s.espaciado ? s.espaciado.join(' × ') : ''], ['Grosor (mm)', s.grosor ?? ''], ['Cortes', s.n], ['Política', s.politica]]) {
@@ -1016,8 +1017,8 @@ async function cargarPacientes() {
   for (const p of pacs) {
     const lab = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = p;
     lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + p + ' (' + SERIES.filter(s => s.paciente === p).length + ' series) '));
-    const est = insignia('neutro', 'consultando revisión…'); lab.appendChild(est); cont.appendChild(lab);
-    api('revision/' + encodeURIComponent(p)).then(r => { const ok = !!r.lista_para_compartir; est.textContent = ok ? '✓ revisión de píxeles vigente, sin hallazgos' : '! revisión de píxeles pendiente'; est.className = 'insignia ' + (ok ? 'ok' : 'aviso'); }).catch(() => { est.textContent = ''; });
+    const est = insignia('neutro', 'consultando revisión…'); est.dataset.paciente = p; lab.appendChild(est); cont.appendChild(lab);
+    api('revision/' + encodeURIComponent(p)).then(r => { const el = cont.querySelector('.insignia[data-paciente="' + p.replace(/"/g, '') + '"]'); if (!el) return; const ok = !!r.lista_para_compartir; el.textContent = ok ? '✓ revisión de píxeles vigente, sin hallazgos' : '! revisión de píxeles pendiente'; el.className = 'insignia ' + (ok ? 'ok' : 'aviso'); }).catch(() => { const el = cont.querySelector('.insignia[data-paciente="' + p.replace(/"/g, '') + '"]'); if (el) el.textContent = 'estado de revisión no disponible'; });
   }
 }
 const elegidos = () => [...document.querySelectorAll('#lista-pacientes input:checked')].map(i => i.value);
