@@ -20,8 +20,8 @@ Este repositorio es la única fuente de la aplicación: código, interfaz, herra
 |---|---|
 | `herramientas/` | `lanzador.py` (punto de entrada del paquete), `app.py`, `anonimizar.py`, `emparejar.py`, `cotejar.py`, `suv.py`, `demo.py` (caso sintético), `ventana.py`, `empaquetar.sh` (PyInstaller), lanzadores de doble clic y la validación IBSI-SUV. Su `README.md` es el manual de uso. |
 | `pruebas/` | Pruebas con DICOM sintéticos que recorren la política: se ejecutan en cada cambio sin tocar datos reales. |
-| `docs/` | `CAMBIOS.md`, el registro de cada hallazgo de revisión, su corrección y su prueba. |
-| `.github/` | `comprobaciones.yml` (pruebas en cada cambio, Linux y Windows) y `publicar.yml` (paquetes, prueba de humo y borrador de Release al etiquetar). |
+| `docs/` | `CAMBIOS.md` (cada hallazgo, su corrección y su prueba), `diseno.md` (tokens y componentes del lenguaje visual), `instalacion.md`, `lanzamientos.md`, `notas-de-version/`, `capturas/` (pantallas con datos sintéticos). |
+| `.github/` | `comprobaciones.yml` (pruebas en cada cambio, Linux y Windows), `interfaz.yml` (prueba en navegador y capturas) y `publicar.yml` (paquetes, prueba de humo por la API, comprobación de adjuntos y borrador de Release al etiquetar). |
 
 ## Cómo trabajamos
 

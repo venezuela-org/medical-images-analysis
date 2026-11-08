@@ -814,83 +814,82 @@ def registro(request: Request):
 HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PET/CT local</title><link rel="stylesheet" href="/static/app.css"></head><body>
-<header><h1>PET/CT local</h1><span>anonimizar · revisar · enviar · todo en 127.0.0.1 · política pet-ct-local/0.4</span></header>
-<nav><button data-tab="entrada" class="activa">1. Entrada</button><button data-tab="estudios">2. Estudios</button><button data-tab="enviar">3. Enviar</button><button data-tab="registro">Registro</button></nav>
+<header class="marca">
+  <svg class="icono" viewBox="0 0 26 26" aria-hidden="true"><rect x="2" y="2" width="15" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9" y="9" width="15" height="15" rx="3" fill="var(--acento)" fill-opacity=".18" stroke="var(--acento)" stroke-width="1.8"/><circle cx="16.5" cy="16.5" r="2.2" fill="var(--acento)"/></svg>
+  <span class="nombre">PET/CT local</span>
+  <span class="lema">anonimizar · revisar · enviar · todo en 127.0.0.1</span>
+  <span class="version" id="version"></span>
+</header>
+<nav class="pestanas"><button data-tab="entrada" class="activa"><span class="paso">1</span>Entrada</button><button data-tab="estudios"><span class="paso">2</span>Estudios</button><button data-tab="enviar"><span class="paso">3</span>Enviar</button><button data-tab="registro"><span class="paso">·</span>Registro</button></nav>
 <main>
-<section id="entrada" class="activa">
+<section id="entrada" class="pestana activa">
   <h2>Carpeta con los DICOM originales</h2>
   <p class="suave">Solo se leen desde donde están. La copia limpia se escribe en la carpeta de trabajo. Los objetos que no son CT, PET, MR o segmentación van a cuarentena y no se copian.</p>
   <div class="fila"><input type="text" id="origen" placeholder="/Users/tu/estudios-originales"><button id="btn-origen">Elegir carpeta…</button><button id="btn-demo" title="Crea un caso CT + PET inventado, sin datos de pacientes, para probar el flujo completo">Crear caso de demostración</button></div>
-  <p id="aviso-origen" class="aviso"></p>
-  <p>Carpeta de trabajo: <code id="trabajo"></code> <span id="aviso-trabajo" class="mal"></span></p>
+  <div id="aviso-origen"></div>
+  <p class="terciario">Carpeta de trabajo: <code id="trabajo"></code> <span id="aviso-trabajo"></span></p>
   <div class="fila"><label>Prefijo <input type="text" id="prefijo" class="corto"></label>
     <label><input type="checkbox" id="conservar"> conservar descripciones de serie y protocolo (revisadas contra nombre e ID)</label>
-    <button id="btn-anonimizar" class="primario">Anonimizar</button><span id="estado-anon" class="suave"></span></div>
-  <pre id="salida-anon" class="oculto"></pre>
-  <pre id="reporte-anon" class="oculto"></pre>
+    <button id="btn-anonimizar" class="primario">Anonimizar</button></div>
+  <div id="estado-anon"></div>
+  <pre id="salida-anon" class="salida oculto"></pre>
+  <details id="det-reporte" class="oculto"><summary>Reporte de la limpieza</summary><pre id="reporte-anon" class="salida"></pre></details>
 </section>
-<section id="estudios">
-  <div class="fila"><h2 class="sin-margen">Estudios limpios</h2><button id="btn-refrescar">Refrescar</button><span id="resumen-estudios" class="suave"></span></div>
-  <table id="tabla-series"><thead><tr><th>Paciente</th><th>Estudio</th><th>Serie</th><th>Mod.</th><th>Descripción</th><th>Cortes</th><th>Matriz</th><th>Política</th></tr></thead><tbody></tbody></table>
+<section id="estudios" class="pestana">
+  <div class="fila"><h2 class="sin-margen">Estudios limpios</h2><button id="btn-refrescar">Refrescar</button><span id="resumen-estudios" class="terciario"></span></div>
+  <div class="tabla-marco"><table id="tabla-series" class="datos"><thead><tr><th>Paciente</th><th>Estudio</th><th>Serie</th><th>Mod.</th><th>Descripción</th><th class="num">Cortes</th><th>Matriz</th><th>Política</th></tr></thead><tbody></tbody></table></div>
   <div class="visor oculto" id="visor">
-    <div><img id="corte" alt="corte"><input type="range" id="deslizador" min="0" max="0" value="0">
-      <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><span id="pos" class="suave"></span></div>
-      <p class="suave">Vista previa ordenada por número de instancia, sin escala cuantitativa. El SUV se calcula en el paso de procesamiento, no aquí.</p></div>
+    <div><div class="lienzo"><img id="corte" alt="corte"></div><input type="range" id="deslizador" min="0" max="0" value="0">
+      <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><span id="pos" class="terciario"></span></div>
+      <p class="terciario">Vista previa ordenada por número de instancia, sin escala cuantitativa. El SUV se calcula en las comprobaciones, no aquí.</p></div>
     <div><div class="meta" id="meta"></div>
+      <h3 style="margin-top:16px">Comprobaciones</h3>
       <div class="fila" id="botones-comprobar"><button data-que="emparejar">Emparejar CT + PET</button><button data-que="cotejar">Cotejar con el original</button><button data-que="suv">SUV de esta serie</button><button data-que="comparar_suv">Comparar SUV original / limpio</button></div>
-      <p class="suave">Alcance: emparejar y cotejar actúan sobre el paciente en pantalla; SUV y la comparación, sobre esta serie.</p>
-      <pre id="salida-comprobar" class="oculto"></pre>
+      <p class="terciario">Alcance: emparejar y cotejar actúan sobre el paciente en pantalla; SUV y la comparación, sobre esta serie.</p>
+      <pre id="salida-comprobar" class="salida oculto"></pre>
       <div class="revision" id="revision">
         <h3>Revisión de píxeles de este paciente</h3>
-        <p class="suave" id="rev-estado"></p>
+        <div id="rev-estado"></div>
         <div class="fila"><label><input type="checkbox" id="rev-texto"> texto grabado</label><label><input type="checkbox" id="rev-rostro"> rostro identificable</label><label><input type="checkbox" id="rev-otro"> otro identificador visible</label></div>
         <div class="fila"><input type="text" id="rev-revisor" placeholder="quien revisa" class="corto"><input type="text" id="rev-notas" placeholder="notas (opcional)"></div>
         <div class="fila"><button id="rev-sin">Registrar: revisada, sin hallazgos</button><button id="rev-con">Registrar: con hallazgos</button></div>
-        <p class="suave">La revisión queda ligada a los hashes exactos de los archivos del paciente; si cambian, pasa a pendiente. Revisar toda la serie, no solo algunos cortes.</p>
+        <p class="terciario">La revisión queda ligada a los hashes exactos de los archivos del paciente; si cambian, pasa a pendiente. Revisar toda la serie, no solo algunos cortes.</p>
       </div></div>
   </div>
   <div class="antes-despues oculto" id="antes-despues">
     <h2>Antes y después de este corte</h2>
-    <p class="suave" id="ad-estado"></p>
-    <div class="par"><div><p class="etq">Original</p><img id="img-original" alt="original"></div><div><p class="etq">Limpio</p><img id="img-limpio" alt="limpio"></div></div>
-    <div class="destacados" id="destacados"></div>
+    <div id="ad-estado"></div>
+    <div class="par"><div><p class="etq">Original</p><div class="lienzo"><img id="img-original" alt="original"></div></div><div><p class="etq">Limpio</p><div class="lienzo"><img id="img-limpio" alt="limpio"></div></div></div>
+    <div class="rejilla" id="destacados"></div>
     <details><summary>Todas las etiquetas por acción</summary><div class="meta" id="detalle-cambios"></div></details>
   </div>
 </section>
-<section id="enviar">
+<section id="enviar" class="pestana">
   <h2>Paquete para el colega</h2>
-  <p class="suave">Elige pacientes uno por uno. Cada archivo se lee una sola vez: esos mismos bytes se verifican contra la política, se hashean en el manifiesto y se escriben al zip, que se relee y comprueba antes de publicarse. Solo entran DICOM limpios. Si algo falla, no se crea nada. El zip se crea localmente; que un paciente tenga la revisión de píxeles pendiente se muestra aquí y queda escrito en el manifiesto.</p>
+  <p class="suave">Elige pacientes uno por uno. Cada archivo se lee una sola vez: esos mismos bytes se verifican contra la política, se hashean en el manifiesto y se escriben al zip, que se relee y comprueba antes de publicarse. Solo entran DICOM limpios. El zip se crea localmente; la revisión de píxeles pendiente se muestra aquí y queda escrita en el manifiesto.</p>
   <div id="lista-pacientes"></div>
   <div class="fila"><button id="btn-verificar">Verificar</button><button id="btn-empaquetar" class="primario">Verificar y empaquetar</button></div>
-  <pre id="salida-enviar" class="oculto"></pre>
+  <div id="estado-enviar"></div>
+  <pre id="salida-enviar" class="salida oculto"></pre>
 </section>
-<section id="registro"><h2>Registro (privado, se queda en la carpeta de trabajo)</h2><pre id="texto-registro"></pre></section>
+<section id="registro" class="pestana"><h2>Registro</h2><p class="terciario">Bitácora privada; se queda en la carpeta de trabajo. Rutas y seudónimos, nunca valores.</p><pre id="texto-registro" class="salida"></pre></section>
 </main>
 <script src="/static/app.js"></script></body></html>"""
 
-CSS = """:root{--fondo:#f7f7f5;--tinta:#1d1d1b;--suave:#6b6b66;--borde:#d9d9d4;--panel:#fff;--acento:#2f6f9f;--ok:#2d7a4f;--mal:#b3402b;--aviso:#9a6b00}
-@media(prefers-color-scheme:dark){:root{--fondo:#161614;--tinta:#ecece8;--suave:#a3a39c;--borde:#33332f;--panel:#1f1f1c;--acento:#7fb3dd;--ok:#6cc08f;--mal:#e27a62;--aviso:#e0b24a}}
-*{box-sizing:border-box}body{margin:0;background:var(--fondo);color:var(--tinta);font:15px/1.45 -apple-system,Segoe UI,Helvetica,Arial,sans-serif}
-header{padding:14px 20px;border-bottom:1px solid var(--borde);display:flex;gap:14px;align-items:baseline}header h1{font-size:18px;margin:0}header span{color:var(--suave);font-size:13px}
-nav{display:flex;gap:4px;padding:10px 20px 0}nav button{background:none;border:1px solid var(--borde);border-bottom:none;border-radius:8px 8px 0 0;padding:8px 14px;color:var(--suave);cursor:pointer;font-size:14px}
-nav button.activa{background:var(--panel);color:var(--tinta);font-weight:600}
-main{padding:20px;max-width:1100px}section{display:none;background:var(--panel);border:1px solid var(--borde);border-radius:0 10px 10px 10px;padding:18px}section.activa{display:block}
-h2{font-size:16px;margin:0 0 10px}.sin-margen{margin:0}p{margin:6px 0}.suave{color:var(--suave)}.oculto{display:none}
-.fila{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
-input[type=text]{flex:1;min-width:240px;padding:8px 10px;border:1px solid var(--borde);border-radius:8px;background:var(--fondo);color:var(--tinta);font-size:14px}input.corto{min-width:90px;max-width:130px;flex:0}
-button{padding:8px 14px;border:1px solid var(--borde);border-radius:8px;background:var(--fondo);color:var(--tinta);cursor:pointer;font-size:14px}
-button.primario{background:var(--acento);border-color:var(--acento);color:#fff}button:disabled{opacity:.5;cursor:default}
-pre{background:var(--fondo);border:1px solid var(--borde);border-radius:8px;padding:10px;font-size:12.5px;max-height:320px;overflow:auto;white-space:pre-wrap}
-.aviso{color:var(--aviso)}.ok{color:var(--ok)}.mal{color:var(--mal)}
-table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:6px 8px;border-bottom:1px solid var(--borde);text-align:left}tr.fila-serie{cursor:pointer}tr.fila-serie:hover{background:var(--fondo)}tr.fila-serie.seleccionada{background:var(--fondo);box-shadow:inset 3px 0 0 var(--acento);font-weight:600}
-.revision{margin-top:14px;border-top:1px solid var(--borde);padding-top:10px}.revision h3{font-size:14px;margin:0 0 6px}.pendiente{color:var(--mal);font-weight:600}.vigente{color:var(--ok);font-weight:600}
-.visor{display:grid;grid-template-columns:minmax(260px,520px) 1fr;gap:16px;margin-top:14px}.visor.oculto{display:none}
-.visor img{width:100%;background:#000;border-radius:8px}.meta{font-size:13px}.meta div{padding:3px 0;border-bottom:1px solid var(--borde)}code{font-size:13px}
-input[type=range]{width:100%}label{font-size:13px}#lista-pacientes label{display:block;font-size:14px}
-.antes-despues{margin-top:18px;border-top:1px solid var(--borde);padding-top:14px}.antes-despues.oculto{display:none}
-.par{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:720px}.par img{width:100%;background:#000;border-radius:8px}.etq{font-size:12px;color:var(--suave);margin:0 0 4px}
-.destacados{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px;margin:12px 0}.destacados div{border:1px solid var(--borde);border-radius:8px;padding:8px 10px;font-size:13px}.destacados b{display:block;font-size:12px;color:var(--suave);font-weight:500}
-details summary{cursor:pointer;font-size:13px;color:var(--suave)}"""
+def _leer_estilo() -> str:
+    """Hoja de estilo compartida (tokens y componentes); junto a app.py o en el paquete congelado."""
+    candidatos = [AQUI / "estilo.css"]
+    if CONGELADO:
+        candidatos.insert(0, Path(getattr(sys, "_MEIPASS", AQUI)) / "estilo.css")
+    for c in candidatos:
+        try:
+            return c.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return "body{font:14px/1.5 system-ui;margin:0;padding:16px}"
+
+
+CSS = _leer_estilo()
 
 JS = r"""'use strict';
 const T = new URLSearchParams(location.search).get('t');
@@ -903,6 +902,8 @@ const api = async (ruta, cuerpo) => {
   if (!r.ok) { const e = new Error(j.detail || j.error || r.statusText); e.datos = j; throw e; }
   return j;
 };
+const mensaje = (sel, tipo, txt) => { const el = $(sel); el.textContent = ''; if (!txt) return el; const d = document.createElement('div'); d.className = 'mensaje ' + tipo; d.textContent = txt; el.appendChild(d); return el; };
+const insignia = (tipo, txt) => { const s = document.createElement('span'); s.className = 'insignia ' + tipo; s.textContent = txt; return s; };
 const celda = (tr, v, cls) => { const td = document.createElement('td'); td.textContent = v == null ? '' : String(v); if (cls) td.className = cls; tr.appendChild(td); };
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button, main section').forEach(x => x.classList.remove('activa'));
@@ -912,38 +913,41 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 async function estado() {
   try {
     const e = await api('estado');
-    texto('#trabajo', e.trabajo); $('#prefijo').value = e.prefijo || 'ANON';
-    texto('#aviso-trabajo', e.sincronizada ? ' Esta carpeta está sincronizada con la nube (' + e.sincronizada + '). Usa otra con --trabajo.' : '');
-    if (!e.anonimizar_presente) texto('#estado-anon', 'Falta anonimizar.py junto a app.py');
-  } catch (err) { texto('#estado-anon', 'Abre la dirección completa que imprimió la terminal, con el token.'); }
+    texto('#trabajo', e.trabajo); $('#prefijo').value = e.prefijo || 'ANON'; texto('#version', 'v' + e.version + (e.congelado ? ' · paquete' : ' · código fuente'));
+    if (e.sincronizada) { const s = $('#aviso-trabajo'); s.textContent = ''; s.appendChild(insignia('error', 'carpeta sincronizada con la nube: ' + e.sincronizada + '; usa otra con --trabajo')); }
+    if (!e.anonimizar_presente) mensaje('#estado-anon', 'error', 'Falta anonimizar.py junto a app.py');
+  } catch (err) { mensaje('#estado-anon', 'error', 'Abre la dirección completa que imprimió la terminal, con el token.'); }
 }
 $('#btn-origen').onclick = async () => {
   const r = await api('elegir-carpeta', {});
-  if (r.ruta) { $('#origen').value = r.ruta; texto('#aviso-origen', r.sincronizada ? 'Está dentro de una carpeta sincronizada (' + r.sincronizada + '). Se puede leer, pero conviene sacarla de la nube.' : ''); }
-  else texto('#aviso-origen', r.mensaje);
+  if (r.ruta) { $('#origen').value = r.ruta; mensaje('#aviso-origen', r.sincronizada ? 'aviso' : 'neutro', r.sincronizada ? 'Está dentro de una carpeta sincronizada (' + r.sincronizada + '). Se puede leer, pero conviene sacarla de la nube.' : 'Carpeta elegida.'); }
+  else mensaje('#aviso-origen', 'aviso', r.mensaje);
 };
 $('#btn-demo').onclick = async () => {
-  $('#btn-demo').disabled = true; texto('#aviso-origen', 'creando caso sintético…');
-  try { const r = await api('demo', {}); $('#origen').value = r.ruta; texto('#aviso-origen', 'Caso sintético listo (identidad ficticia, sin datos reales). Pulsa Anonimizar para recorrer el flujo completo.'); }
-  catch (err) { texto('#aviso-origen', err.message); } finally { $('#btn-demo').disabled = false; }
+  $('#btn-demo').disabled = true; mensaje('#aviso-origen', 'neutro', 'creando caso sintético…');
+  try { const r = await api('demo', {}); $('#origen').value = r.ruta; mensaje('#aviso-origen', 'ok', 'Caso sintético listo (identidad ficticia, sin datos reales). Pulsa Anonimizar para recorrer el flujo completo.'); }
+  catch (err) { mensaje('#aviso-origen', 'error', err.message); } finally { $('#btn-demo').disabled = false; }
 };
 $('#btn-anonimizar').onclick = async () => {
   const origen = $('#origen').value.trim();
-  if (!origen) { texto('#aviso-origen', 'Elige o escribe la carpeta de originales.'); return; }
-  $('#btn-anonimizar').disabled = true; $('#salida-anon').classList.remove('oculto'); texto('#salida-anon', ''); $('#reporte-anon').classList.add('oculto'); texto('#estado-anon', 'corriendo…');
+  if (!origen) { mensaje('#aviso-origen', 'aviso', 'Elige o escribe la carpeta de originales.'); return; }
+  $('#btn-anonimizar').disabled = true; $('#salida-anon').classList.remove('oculto'); texto('#salida-anon', ''); $('#det-reporte').classList.add('oculto');
+  const inicio = Date.now(); const reloj = () => { const s = Math.round((Date.now() - inicio) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  mensaje('#estado-anon', 'neutro', 'limpieza en curso · 00:00');
   try {
     const {trabajo} = await api('anonimizar', {origen, prefijo: $('#prefijo').value.trim(), conservar_descripciones: $('#conservar').checked});
     const esperar = async () => {
       const t = await api('trabajo/' + trabajo); texto('#salida-anon', t.lineas.join('\n'));
-      if (t.estado === 'corriendo') return setTimeout(esperar, 800);
-      const el = texto('#estado-anon', t.estado === 'ok' ? 'limpieza terminada; la verificación posterior pasó en las etiquetas revisadas (los píxeles no se revisan)' :
-        t.estado === 'con avisos' ? 'terminó con cuarentena o avisos; revisa el reporte antes de enviar' : 'terminó con error; revisa la salida');
-      el.className = t.estado === 'ok' ? 'ok' : (t.estado === 'con avisos' ? 'aviso' : 'mal');
-      if (t.reporte) { $('#reporte-anon').classList.remove('oculto'); texto('#reporte-anon', t.reporte); }
+      if (t.estado === 'corriendo') { const prog = [...t.lineas].reverse().find(l => /archivos limpios/.test(l)); mensaje('#estado-anon', 'neutro', 'limpieza en curso · ' + reloj() + (prog ? ' · ' + prog.trim().split(' (')[0] : '')); return setTimeout(esperar, 800); }
+      const listo = t.lineas.find(l => l.startsWith('Listo')) || '';
+      if (t.estado === 'ok') mensaje('#estado-anon', 'ok', 'Limpieza terminada en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. La verificación posterior pasó en las etiquetas revisadas; los píxeles no se revisan.');
+      else if (t.estado === 'con avisos') mensaje('#estado-anon', 'aviso', 'Terminó con cuarentena o avisos en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. Revisa el reporte antes de enviar.');
+      else mensaje('#estado-anon', 'error', 'Terminó con error. Revisa la salida.');
+      if (t.reporte) { $('#det-reporte').classList.remove('oculto'); texto('#reporte-anon', t.reporte); }
       $('#btn-anonimizar').disabled = false; ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = []; cargarEstudios(1);
     };
     esperar();
-  } catch (err) { texto('#estado-anon', err.message).className = 'mal'; $('#btn-anonimizar').disabled = false; }
+  } catch (err) { mensaje('#estado-anon', 'error', err.message); $('#btn-anonimizar').disabled = false; }
 };
 let SERIES = [], ACTUAL = null, ADSEQ = 0;
 async function cargarEstudios(refrescar) {
@@ -952,8 +956,8 @@ async function cargarEstudios(refrescar) {
   texto('#resumen-estudios', SERIES.length + ' series, ' + new Set(SERIES.map(s => s.paciente)).size + ' paciente(s)');
   for (const s of SERIES) {
     const tr = document.createElement('tr'); tr.className = 'fila-serie';
-    celda(tr, s.paciente); celda(tr, s.estudio); celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n);
-    celda(tr, s.filas + '×' + s.columnas); celda(tr, s.politica || 'sin política', s.politica ? 'ok' : 'mal');
+    celda(tr, s.paciente); celda(tr, s.estudio); celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n, 'num');
+    celda(tr, s.filas + '×' + s.columnas); const tdp = document.createElement('td'); tdp.appendChild(insignia(s.politica ? 'info' : 'error', s.politica || 'sin política')); tr.appendChild(tdp);
     tr.dataset.id = s.id; tr.onclick = () => abrir(s); tb.appendChild(tr);
   }
   if (ACTUAL) { const fila = tb.querySelector('tr[data-id="' + ACTUAL.id + '"]'); if (fila) fila.classList.add('seleccionada'); else { ACTUAL = null; $('#visor').classList.add('oculto'); } }
@@ -969,7 +973,7 @@ function abrir(s) {
   const m = $('#meta'); m.textContent = '';
   for (const [k, v] of [['Paciente', s.paciente], ['Estudio', s.estudio], ['Serie', s.serie], ['Modalidad', s.modalidad], ['Descripción', s.descripcion], ['Protocolo', s.protocolo],
        ['Matriz', s.filas + '×' + s.columnas], ['Espaciado (mm)', s.espaciado ? s.espaciado.join(' × ') : ''], ['Grosor (mm)', s.grosor ?? ''], ['Cortes', s.n], ['Política', s.politica]]) {
-    const div = document.createElement('div'); const b = document.createElement('b'); b.textContent = k; div.appendChild(b); div.appendChild(document.createTextNode(': ' + (v == null ? '' : v))); m.appendChild(div);
+    const div = document.createElement('div'); const b = document.createElement('b'); b.textContent = k; div.appendChild(b); const val = document.createElement('span'); val.textContent = (v == null || v === '') ? '—' : String(v); div.appendChild(val); m.appendChild(div);
   }
   mostrarCorte();
 }
@@ -987,22 +991,22 @@ async function antesDespues(i) {
     const r = await api('serie/' + sid + '/cambios/' + i);
     if (seq !== ADSEQ || !ACTUAL || ACTUAL.id !== serieId || Number($('#deslizador').value) !== i || $('#ventana').value !== ventana) return;
     if (!r.disponible) {
-      texto('#ad-estado', r.motivo); $('#img-original').removeAttribute('src'); $('#destacados').textContent = ''; $('#detalle-cambios').textContent = '';
-      if (r.raiz) { const b = document.createElement('button'); b.textContent = 'Indicar dónde están ahora los originales…'; b.onclick = async () => { const x = await api('raiz', {anterior: r.raiz}); if (x.ok) antesDespues(i); else texto('#ad-estado', x.mensaje); }; $('#ad-estado').appendChild(document.createTextNode(' ')); $('#ad-estado').appendChild(b); }
+      mensaje('#ad-estado', 'aviso', r.motivo); $('#img-original').removeAttribute('src'); $('#destacados').textContent = ''; $('#detalle-cambios').textContent = '';
+      if (r.raiz) { const b = document.createElement('button'); b.textContent = 'Indicar dónde están ahora los originales…'; b.onclick = async () => { const x = await api('raiz', {anterior: r.raiz}); if (x.ok) antesDespues(i); else mensaje('#ad-estado', 'error', x.mensaje); }; $('#ad-estado').appendChild(b); }
       return;
     }
     $('#img-original').src = '/api/serie/' + sid + '/corte_original/' + i + '?ventana=' + v + '&t=' + encodeURIComponent(T);
-    texto('#ad-estado', 'Misma ventana en ambos lados. Los valores originales nunca se muestran; aquí solo aparece qué se hizo con cada etiqueta.');
+    mensaje('#ad-estado', 'info', 'Misma ventana en ambos lados. Los valores originales nunca se muestran; aquí solo aparece qué se hizo con cada etiqueta. Es una comprobación de metadatos y de bytes de píxeles; la revisión de píxeles es aparte.');
     const d = r.destacados, s = r.resumen, n = k => s[k] || 0;
     const tarjetas = [['Nombre del paciente', 'oculto → ' + d.nombre], ['ID del paciente', 'oculto → ' + d.id], ['Fecha de nacimiento', 'oculta → ' + d.fecha_nacimiento],
       ['Píxeles (bytes de PixelData)', d.pixeles_identicos ? 'idénticos al original, SHA-256' : 'DISTINTOS al original'], ['Fechas', n('fecha desplazada') + ' desplazadas, horas intactas'],
       ['UID', n('UID reescrito') + ' reescritos'], ['Etiquetas eliminadas', (n('eliminado') + n('privada eliminada')) + ' (' + n('privada eliminada') + ' privadas)'],
       ['Sin cambio', r.sin_cambio + ' etiquetas técnicas'], ['Política', d.politica]];
     const cont = $('#destacados'); cont.textContent = '';
-    for (const [k, val] of tarjetas) { const div = document.createElement('div'); const b = document.createElement('b'); b.textContent = k; div.appendChild(b); div.appendChild(document.createTextNode(val)); cont.appendChild(div); }
+    for (const [k, val] of tarjetas) { const div = document.createElement('div'); div.className = 'tarjeta'; const b = document.createElement('b'); b.textContent = k; div.appendChild(b); div.appendChild(document.createTextNode(val)); cont.appendChild(div); }
     const det = $('#detalle-cambios'); det.textContent = '';
-    for (const [accion, lista] of Object.entries(r.detalle)) { const div = document.createElement('div'); const b = document.createElement('b'); b.textContent = accion + ' (' + lista.length + ')'; div.appendChild(b); div.appendChild(document.createTextNode(': ' + lista.join(', '))); det.appendChild(div); }
-  } catch (err) { texto('#ad-estado', err.message); }
+    for (const [accion, lista] of Object.entries(r.detalle)) { const div = document.createElement('div'); div.style.display = 'block'; const b = document.createElement('b'); b.textContent = accion + ' (' + lista.length + '): '; div.appendChild(b); div.appendChild(document.createTextNode(lista.join(', '))); det.appendChild(div); }
+  } catch (err) { mensaje('#ad-estado', 'error', err.message); }
 }
 $('#deslizador').oninput = mostrarCorte; $('#ventana').onchange = mostrarCorte;
 async function cargarPacientes() {
@@ -1012,20 +1016,24 @@ async function cargarPacientes() {
   for (const p of pacs) {
     const lab = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = p;
     lab.appendChild(cb); lab.appendChild(document.createTextNode(' ' + p + ' (' + SERIES.filter(s => s.paciente === p).length + ' series) '));
-    const est = document.createElement('span'); est.textContent = '…'; lab.appendChild(est); cont.appendChild(lab);
-    api('revision/' + encodeURIComponent(p)).then(r => { const ok = !!r.lista_para_compartir; est.textContent = ok ? 'revisión de píxeles vigente, sin hallazgos' : 'REVISIÓN DE PÍXELES PENDIENTE'; est.className = ok ? 'vigente' : 'pendiente'; }).catch(() => { est.textContent = ''; });
+    const est = insignia('neutro', 'consultando revisión…'); lab.appendChild(est); cont.appendChild(lab);
+    api('revision/' + encodeURIComponent(p)).then(r => { const ok = !!r.lista_para_compartir; est.textContent = ok ? '✓ revisión de píxeles vigente, sin hallazgos' : '! revisión de píxeles pendiente'; est.className = 'insignia ' + (ok ? 'ok' : 'aviso'); }).catch(() => { est.textContent = ''; });
   }
 }
 const elegidos = () => [...document.querySelectorAll('#lista-pacientes input:checked')].map(i => i.value);
 $('#btn-verificar').onclick = async () => {
   const o = $('#salida-enviar'); o.classList.remove('oculto');
-  try { const r = await api('verificar', {pacientes: elegidos()}); texto('#salida-enviar', Object.entries(r).map(([p, v]) => p + ': ' + (v.codigo === 0 ? 'LIMPIO' : 'PROBLEMAS') + '\n' + v.salida).join('\n')); }
-  catch (err) { texto('#salida-enviar', err.message); }
+  try { const r = await api('verificar', {pacientes: elegidos()}); const malos = Object.values(r).filter(v => v.codigo !== 0).length;
+    mensaje('#estado-enviar', malos ? 'error' : 'ok', malos ? 'Compuerta: ' + malos + ' paciente(s) con problemas. Esto es la verificación de metadatos; la revisión de píxeles es aparte.' : 'Compuerta: metadatos en regla en todos los pacientes elegidos. Esto no es la revisión de píxeles ni significa listo para compartir.');
+    texto('#salida-enviar', Object.entries(r).map(([p, v]) => p + ': ' + (v.codigo === 0 ? 'LIMPIO' : 'PROBLEMAS') + '\n' + v.salida).join('\n')); }
+  catch (err) { mensaje('#estado-enviar', 'error', err.message); }
 };
 $('#btn-empaquetar').onclick = async () => {
-  const o = $('#salida-enviar'); o.classList.remove('oculto'); texto('#salida-enviar', 'verificando y empaquetando…');
-  try { const r = await api('empaquetar', {pacientes: elegidos()}); texto('#salida-enviar', 'Paquete creado localmente: ' + r.ruta + '\n' + r.archivos + ' archivos de ' + r.pacientes.join(', ') + '\nIncluye manifiesto.json con el hash de cada archivo. El mapa privado no entra.' + (r.revision_pixeles_pendiente && r.revision_pixeles_pendiente.length ? '\nREVISIÓN DE PÍXELES PENDIENTE para: ' + r.revision_pixeles_pendiente.join(', ') + '. El paquete existe, pero no está listo para compartirse.' : '\nRevisión de píxeles vigente y sin hallazgos en todos los pacientes.')); }
-  catch (err) { texto('#salida-enviar', 'RECHAZADO: ' + err.message + (err.datos && err.datos.fallos ? '\n' + Object.entries(err.datos.fallos).map(([p, s]) => p + ': ' + (Array.isArray(s) ? s.join('; ') : s)).join('\n') : '')); }
+  const o = $('#salida-enviar'); o.classList.remove('oculto'); mensaje('#estado-enviar', 'neutro', 'verificando y empaquetando…'); texto('#salida-enviar', '');
+  try { const r = await api('empaquetar', {pacientes: elegidos()}); const pend = r.revision_pixeles_pendiente || [];
+    mensaje('#estado-enviar', pend.length ? 'aviso' : 'ok', pend.length ? 'Paquete creado localmente, con revisión de píxeles pendiente para ' + pend.join(', ') + '. Existe, pero no está listo para compartirse.' : 'Paquete creado localmente con revisión de píxeles vigente y sin hallazgos en todos los pacientes.');
+    texto('#salida-enviar', r.ruta + '\n' + r.archivos + ' archivos de ' + r.pacientes.join(', ') + '\nIncluye manifiesto.json con el hash de cada archivo y el estado de la revisión. El mapa privado no entra.'); }
+  catch (err) { mensaje('#estado-enviar', 'error', 'Rechazado: ' + err.message); texto('#salida-enviar', err.datos && err.datos.fallos ? Object.entries(err.datos.fallos).map(([p, s]) => p + ': ' + (Array.isArray(s) ? s.join('; ') : s)).join('\n') : ''); }
 };
 document.querySelectorAll('#botones-comprobar button').forEach(b => b.onclick = async () => {
   if (!ACTUAL) return; const o = $('#salida-comprobar'); o.classList.remove('oculto'); texto('#salida-comprobar', 'corriendo ' + b.dataset.que + '…');
@@ -1033,13 +1041,12 @@ document.querySelectorAll('#botones-comprobar button').forEach(b => b.onclick = 
   catch (err) { texto('#salida-comprobar', err.message); }
 });
 function pintarRevision(r) {
-  const el = $('#rev-estado'); el.className = '';
-  if (r.lista_para_compartir) { el.textContent = 'Revisada sin hallazgos el ' + r.fecha + (r.revisor ? ' por ' + r.revisor : '') + ' (' + r.archivos_revisados + ' archivos, vigente).'; el.classList.add('vigente'); }
-  else if (r.estado === 'con_hallazgos' && r.vigente) { el.textContent = 'Con hallazgos (' + (r.hallazgos || []).join(', ') + ') el ' + r.fecha + '. Requiere tratamiento antes de compartir.'; el.classList.add('pendiente'); }
-  else { el.textContent = 'Revisión de píxeles pendiente: ' + (r.detalle || ''); el.classList.add('pendiente'); }
+  if (r.lista_para_compartir) mensaje('#rev-estado', 'ok', 'Revisión de píxeles: sin hallazgos, vigente. Registrada el ' + r.fecha + (r.revisor ? ' por ' + r.revisor : '') + ' sobre ' + r.archivos_revisados + ' archivos. Lista para compartir.');
+  else if (r.estado === 'con_hallazgos' && r.vigente) mensaje('#rev-estado', 'error', 'Revisión de píxeles: con hallazgos (' + (r.hallazgos || []).join(', ') + ') el ' + r.fecha + '. Requiere tratamiento antes de compartir.');
+  else mensaje('#rev-estado', 'aviso', 'Revisión de píxeles pendiente: ' + (r.detalle || ''));
 }
 let REVSEQ = 0;
-function limpiarFormularioRevision() { REVSEQ++; ['#rev-texto', '#rev-rostro', '#rev-otro'].forEach(s => { $(s).checked = false; }); $('#rev-notas').value = ''; texto('#rev-estado', 'cargando…').className = ''; $('#rev-sin').disabled = $('#rev-con').disabled = true; }
+function limpiarFormularioRevision() { REVSEQ++; ['#rev-texto', '#rev-rostro', '#rev-otro'].forEach(s => { $(s).checked = false; }); $('#rev-notas').value = ''; mensaje('#rev-estado', 'neutro', 'cargando…'); $('#rev-sin').disabled = $('#rev-con').disabled = true; }
 function hallazgosMarcados() { return [['#rev-texto', 'texto_grabado'], ['#rev-rostro', 'rostro'], ['#rev-otro', 'otro']].filter(([s]) => $(s).checked).map(([, v]) => v); }
 function actualizarBotonesRevision() { if (REV_GUARDANDO) return; const h = hallazgosMarcados().length, rev = $('#rev-revisor').value.trim().length > 0; $('#rev-sin').disabled = h > 0 || !rev; $('#rev-con').disabled = h === 0 || !rev; }
 ['#rev-texto', '#rev-rostro', '#rev-otro'].forEach(s => { $(s).onchange = actualizarBotonesRevision; }); $('#rev-revisor').oninput = actualizarBotonesRevision;
@@ -1047,7 +1054,7 @@ async function cargarRevision(pac) {
   const seq = ++REVSEQ;
   const vigente = () => seq === REVSEQ && ACTUAL && ACTUAL.paciente === pac;
   try { const r = await api('revision/' + encodeURIComponent(pac)); if (vigente()) pintarRevision(r); }
-  catch (err) { if (vigente()) texto('#rev-estado', err.message).className = 'pendiente'; }
+  catch (err) { if (vigente()) mensaje('#rev-estado', 'error', err.message); }
   finally { if (vigente()) actualizarBotonesRevision(); }
 }
 let REV_GUARDANDO = false;
@@ -1055,12 +1062,12 @@ async function registrarRevision(estado) {
   if (!ACTUAL || REV_GUARDANDO) return;
   const pac = ACTUAL.paciente, seq = ++REVSEQ;
   const hallazgos = hallazgosMarcados(), revisor = $('#rev-revisor').value.trim();
-  if (!revisor) { texto('#rev-estado', 'indica quién revisa').className = 'pendiente'; return; }
-  if (estado === 'sin_hallazgos' && hallazgos.length) { texto('#rev-estado', 'hay hallazgos marcados: el resultado no puede ser sin hallazgos').className = 'pendiente'; return; }
-  REV_GUARDANDO = true; $('#rev-sin').disabled = $('#rev-con').disabled = true; texto('#rev-estado', 'guardando…').className = '';
+  if (!revisor) { mensaje('#rev-estado', 'aviso', 'indica quién revisa'); return; }
+  if (estado === 'sin_hallazgos' && hallazgos.length) { mensaje('#rev-estado', 'aviso', 'hay hallazgos marcados: el resultado no puede ser sin hallazgos'); return; }
+  REV_GUARDANDO = true; $('#rev-sin').disabled = $('#rev-con').disabled = true; mensaje('#rev-estado', 'neutro', 'guardando…');
   const vigente = () => seq === REVSEQ && ACTUAL && ACTUAL.paciente === pac;   // misma petición, misma selección
   try { const r = await api('revision', {paciente: pac, estado, hallazgos, revisor, notas: $('#rev-notas').value.trim()}); if (vigente()) pintarRevision(r); }
-  catch (err) { if (vigente()) texto('#rev-estado', err.message).className = 'pendiente'; }
+  catch (err) { if (vigente()) mensaje('#rev-estado', 'error', err.message); }
   finally { REV_GUARDANDO = false; if (vigente()) actualizarBotonesRevision(); }
 }
 $('#rev-sin').onclick = () => registrarRevision('sin_hallazgos'); $('#rev-con').onclick = () => registrarRevision('con_hallazgos');

@@ -1,0 +1,143 @@
+/* PET/CT local: tokens de diseño y componentes reutilizables.
+   Documentación en docs/diseno.md. Un lenguaje visual sereno y preciso: fondos neutros, texto oscuro legible,
+   un solo color de acento, estados siempre con texto o símbolo además del color. */
+
+/* ---------- 1. Tokens ---------- */
+:root {
+  /* color: neutros */
+  --fondo: #f6f6f4;          /* fondo de la página */
+  --panel: #ffffff;          /* tarjetas y secciones */
+  --panel-2: #f0f0ed;        /* superficies secundarias: cabeceras de tabla, cajas de salida */
+  --borde: #d8d8d3;
+  --borde-fuerte: #b9b9b2;
+  --tinta: #1c1c1a;          /* texto principal */
+  --tinta-2: #5f5f5a;        /* texto secundario */
+  --tinta-3: #8a8a84;        /* texto terciario, etiquetas */
+  --imagen-fondo: #000000;   /* las imágenes médicas siempre sobre negro */
+  /* color: acento único */
+  --acento: #2b6cb0;
+  --acento-tinta: #ffffff;
+  --acento-suave: #e6eef8;
+  /* estados: siempre acompañados de texto o símbolo */
+  --ok: #2f7a4a;      --ok-suave: #e7f3eb;
+  --aviso: #8a6400;   --aviso-suave: #fbf3dc;
+  --error: #a63a2a;   --error-suave: #f9e7e3;
+  --info: #3c5a7a;    --info-suave: #e9eef4;
+  /* tipografía */
+  --fuente: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --t-xs: 12px; --t-s: 13px; --t-m: 14px; --t-l: 16px; --t-xl: 20px;
+  --interlineado: 1.5;
+  /* espacio (escala de 4) */
+  --e-1: 4px; --e-2: 8px; --e-3: 12px; --e-4: 16px; --e-5: 20px; --e-6: 24px; --e-8: 32px;
+  /* bordes y sombras */
+  --radio: 8px; --radio-s: 6px;
+  --sombra: 0 1px 2px rgba(0,0,0,.06);
+  --ancho-max: 1180px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fondo: #151514; --panel: #1e1e1c; --panel-2: #262624; --borde: #35352f; --borde-fuerte: #4a4a43;
+    --tinta: #ebebe6; --tinta-2: #a9a9a1; --tinta-3: #7f7f78;
+    --acento: #7fb0e6; --acento-tinta: #0f1a26; --acento-suave: #22303f;
+    --ok: #74c494; --ok-suave: #1d2f24; --aviso: #e0b64f; --aviso-suave: #352c14;
+    --error: #e58876; --error-suave: #3a2420; --info: #9fb8d2; --info-suave: #222a33;
+    --sombra: none;
+  }
+}
+
+/* ---------- 2. Base ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--fondo); color: var(--tinta); font: var(--t-m)/var(--interlineado) var(--fuente); -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: var(--t-l); }
+h2 { font-size: var(--t-l); margin-bottom: var(--e-3); }
+h3 { font-size: var(--t-m); margin-bottom: var(--e-2); }
+p { margin: var(--e-2) 0; }
+code, pre, .mono { font-family: var(--mono); font-size: var(--t-s); }
+a { color: var(--acento); }
+.suave { color: var(--tinta-2); }
+.terciario { color: var(--tinta-3); font-size: var(--t-s); }
+.oculto { display: none !important; }
+.sin-margen { margin: 0; }
+
+/* ---------- 3. Identidad y navegación ---------- */
+.marca { display: flex; align-items: center; gap: var(--e-3); padding: var(--e-4) var(--e-6); border-bottom: 1px solid var(--borde); background: var(--panel); }
+.marca .icono { width: 26px; height: 26px; flex: none; }
+.marca .nombre { font-size: var(--t-l); font-weight: 600; }
+.marca .lema { color: var(--tinta-2); font-size: var(--t-s); }
+.marca .version { margin-left: auto; color: var(--tinta-3); font-size: var(--t-xs); font-family: var(--mono); }
+nav.pestanas { display: flex; gap: var(--e-1); padding: var(--e-4) var(--e-6) 0; max-width: var(--ancho-max); }
+nav.pestanas button { background: none; border: 1px solid transparent; border-bottom: none; border-radius: var(--radio) var(--radio) 0 0; padding: var(--e-2) var(--e-4); color: var(--tinta-2); cursor: pointer; font: inherit; }
+nav.pestanas button:hover { color: var(--tinta); }
+nav.pestanas button.activa { background: var(--panel); border-color: var(--borde); color: var(--tinta); font-weight: 600; }
+nav.pestanas button .paso { display: inline-block; min-width: 1.4em; text-align: center; margin-right: var(--e-1); color: var(--tinta-3); font-family: var(--mono); font-size: var(--t-xs); }
+main { padding: 0 var(--e-6) var(--e-8); max-width: var(--ancho-max); }
+section.pestana { display: none; background: var(--panel); border: 1px solid var(--borde); border-radius: 0 var(--radio) var(--radio) var(--radio); padding: var(--e-5) var(--e-6); box-shadow: var(--sombra); }
+section.pestana.activa { display: block; }
+
+/* ---------- 4. Controles ---------- */
+.fila { display: flex; gap: var(--e-2); align-items: center; flex-wrap: wrap; margin: var(--e-3) 0; }
+label { font-size: var(--t-s); color: var(--tinta-2); display: inline-flex; align-items: center; gap: var(--e-1); }
+input[type=text], select { padding: var(--e-2) var(--e-3); border: 1px solid var(--borde-fuerte); border-radius: var(--radio-s); background: var(--panel); color: var(--tinta); font: inherit; min-height: 36px; }
+input[type=text] { flex: 1; min-width: 240px; }
+input[type=text].corto { flex: 0; min-width: 120px; max-width: 160px; }
+input[type=text]:focus, select:focus, button:focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+button { padding: var(--e-2) var(--e-4); border: 1px solid var(--borde-fuerte); border-radius: var(--radio-s); background: var(--panel); color: var(--tinta); cursor: pointer; font: inherit; min-height: 36px; }
+button:hover { background: var(--panel-2); }
+button.primario { background: var(--acento); border-color: var(--acento); color: var(--acento-tinta); font-weight: 600; }
+button.primario:hover { filter: brightness(1.06); }
+button:disabled { opacity: .45; cursor: default; }
+input[type=range] { width: 100%; accent-color: var(--acento); }
+input[type=checkbox] { accent-color: var(--acento); }
+
+/* ---------- 5. Tarjetas, salidas y mensajes ---------- */
+.tarjeta { border: 1px solid var(--borde); border-radius: var(--radio); padding: var(--e-3) var(--e-4); background: var(--panel); }
+.tarjeta b { display: block; font-size: var(--t-xs); color: var(--tinta-3); font-weight: 500; margin-bottom: 2px; text-transform: uppercase; letter-spacing: .04em; }
+.rejilla { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--e-2); margin: var(--e-3) 0; }
+pre.salida { background: var(--panel-2); border: 1px solid var(--borde); border-radius: var(--radio-s); padding: var(--e-3); max-height: 320px; overflow: auto; white-space: pre-wrap; margin: var(--e-2) 0; }
+.mensaje { display: flex; gap: var(--e-2); align-items: flex-start; border-radius: var(--radio-s); padding: var(--e-2) var(--e-3); font-size: var(--t-s); border: 1px solid var(--borde); background: var(--panel-2); color: var(--tinta); margin: var(--e-2) 0; }
+.mensaje::before { font-family: var(--mono); flex: none; }
+.mensaje.ok { background: var(--ok-suave); border-color: var(--ok); } .mensaje.ok::before { content: "✓"; color: var(--ok); }
+.mensaje.aviso { background: var(--aviso-suave); border-color: var(--aviso); } .mensaje.aviso::before { content: "!"; color: var(--aviso); font-weight: 700; }
+.mensaje.error { background: var(--error-suave); border-color: var(--error); } .mensaje.error::before { content: "×"; color: var(--error); font-weight: 700; }
+.mensaje.info { background: var(--info-suave); border-color: var(--info); } .mensaje.info::before { content: "i"; color: var(--info); font-weight: 700; }
+.mensaje.neutro::before { content: "·"; color: var(--tinta-3); }
+
+/* Insignias de estado: texto siempre; el color refuerza, nunca sustituye */
+.insignia { display: inline-flex; align-items: center; gap: var(--e-1); font-size: var(--t-xs); padding: 2px var(--e-2); border-radius: 999px; border: 1px solid var(--borde); background: var(--panel-2); color: var(--tinta-2); white-space: nowrap; }
+.insignia.ok { background: var(--ok-suave); border-color: var(--ok); color: var(--ok); }
+.insignia.aviso { background: var(--aviso-suave); border-color: var(--aviso); color: var(--aviso); }
+.insignia.error { background: var(--error-suave); border-color: var(--error); color: var(--error); }
+.insignia.info { background: var(--info-suave); border-color: var(--info); color: var(--info); }
+
+/* ---------- 6. Tablas ---------- */
+table.datos { border-collapse: collapse; width: 100%; font-size: var(--t-s); }
+table.datos th { text-align: left; font-weight: 500; color: var(--tinta-2); background: var(--panel-2); padding: var(--e-2) var(--e-3); border-bottom: 1px solid var(--borde-fuerte); position: sticky; top: 0; }
+table.datos td { padding: var(--e-2) var(--e-3); border-bottom: 1px solid var(--borde); vertical-align: middle; }
+table.datos td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.datos tr.fila-serie { cursor: pointer; }
+table.datos tr.fila-serie:hover { background: var(--panel-2); }
+table.datos tr.fila-serie.seleccionada { background: var(--acento-suave); box-shadow: inset 4px 0 0 var(--acento); }
+table.datos tr.fila-serie.seleccionada td:first-child::before { content: "▸ "; color: var(--acento); }
+.tabla-marco { max-height: 320px; overflow: auto; border: 1px solid var(--borde); border-radius: var(--radio-s); }
+
+/* ---------- 7. Visor de imágenes ---------- */
+.visor { display: grid; grid-template-columns: minmax(320px, 560px) minmax(260px, 1fr); gap: var(--e-5); margin-top: var(--e-4); }
+.visor.oculto { display: none; }
+.lienzo { background: var(--imagen-fondo); border-radius: var(--radio); padding: var(--e-2); }
+.lienzo img { display: block; width: 100%; border-radius: var(--radio-s); background: var(--imagen-fondo); image-rendering: auto; }
+.meta { font-size: var(--t-s); }
+.meta div { display: flex; justify-content: space-between; gap: var(--e-3); padding: var(--e-1) 0; border-bottom: 1px solid var(--borde); }
+.meta b { font-weight: 500; color: var(--tinta-2); }
+.par { display: grid; grid-template-columns: 1fr 1fr; gap: var(--e-3); max-width: 760px; }
+.par .etq { font-size: var(--t-xs); color: var(--tinta-3); margin: 0 0 var(--e-1); text-transform: uppercase; letter-spacing: .04em; }
+.antes-despues, .revision { margin-top: var(--e-5); border-top: 1px solid var(--borde); padding-top: var(--e-4); }
+details summary { cursor: pointer; font-size: var(--t-s); color: var(--tinta-2); }
+#lista-pacientes label { display: flex; gap: var(--e-2); align-items: center; font-size: var(--t-m); color: var(--tinta); padding: var(--e-1) 0; }
+
+@media (max-width: 900px) {
+  .visor { grid-template-columns: 1fr; }
+  main, nav.pestanas { padding-left: var(--e-4); padding-right: var(--e-4); }
+}
