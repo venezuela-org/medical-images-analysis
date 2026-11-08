@@ -220,3 +220,10 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|---|
 | macOS: "Python.framework está dañado" en un Mac real | La descarga lleva la marca de cuarentena y Gatekeeper bloquea las bibliotecas del paquete. El lanzador `Abrir PET-CT local.command` quita la cuarentena de su carpeta antes de arrancar (`xattr -dr com.apple.quarantine .`) y el flujo firma ad hoc cada binario (`.dylib`, `.so`, frameworks y ejecutable). Instrucciones con el remedio manual por Terminal | Pendiente de prueba en el Mac de Arturo con el paquete v0.7.2 |
 | Python fijo en los paquetes | `empaquetar.sh` usa Python 3.12 en vez del más reciente del runner (macOS había construido con 3.15) | Construcción en Linux con 3.12 y prueba de humo por API en verde |
+
+# Cambios 0.7.3 / Changes 0.7.3
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| SUV solo en PET | "SUV de esta serie" y "Comparar SUV original / limpio" deshabilitados en series que no son PET, con nota | Prueba en navegador en verde |
+| Insignias de Enviar | La insignia de revisión se busca en la lista actual al llegar la respuesta; si la lista se repintó, se actualiza igual | Prueba en navegador en verde |
