@@ -123,7 +123,7 @@ def main() -> int:
             expect(pag.locator("#rev-con")).to_be_disabled()
             ok(True, "botones de revisión: deshabilitados sin revisor; con un hallazgo solo 'con hallazgos'; sin hallazgos solo 'sin hallazgos'")
             pag.click("#rev-sin")
-            expect(pag.locator("#rev-estado")).to_contain_text("Lista para compartir", timeout=30000)
+            expect(pag.locator("#rev-estado")).to_contain_text("sin hallazgos, vigente", timeout=30000)
             ok(True, "revisión sin hallazgos registrada y vigente")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-2-estudios.png"), full_page=True)
 

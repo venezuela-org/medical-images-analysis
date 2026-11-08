@@ -27,7 +27,12 @@ import sys
 import zipfile
 from pathlib import Path
 
-PRIVADOS = re.compile(r"(mapa_seudonimos|indice_origen|raices\.json|corridas\.jsonl|revision_pixeles|registro\.log|/PRIVADO/|limpios_PRIVADO|paquete_\d{8}_)", re.I)
+try:
+    import pydicom
+except ImportError:  # sin pydicom no se puede validar la demo: se rechaza, nunca se acepta en silencio
+    pydicom = None
+
+PRIVADOS = re.compile(r"(mapa_seudonimos|indice_origen|raices\.json|corridas\.jsonl|revision_pixeles|registro\.log|(?:^|[/\\])PRIVADO(?:[/\\]|$)|limpios_PRIVADO|paquete_\d{8}_)", re.I)
 DEMO_NOMBRE, DEMO_FABRICANTE, DEMO_CREADOR = b"DEMO^PACIENTE^SINTETICO", b"DEMO SINTETICA", b"DEMO PRIVADO"
 
 
@@ -49,19 +54,20 @@ def revisar_zip(ruta: Path) -> list[str]:
                 if not es_demo:
                     problemas.append(f"{ruta.name}: contiene un DICOM: {info.filename}")
                     continue
-                if DEMO_NOMBRE not in datos or DEMO_FABRICANTE not in datos:
-                    problemas.append(f"{ruta.name}: DICOM sin la identidad sintética de la demo: {info.filename}")
-                # cualquier creador privado que no sea el de la demo delata un origen distinto
+                if pydicom is None:
+                    problemas.append(f"{ruta.name}: no se puede validar la demo sin pydicom: {info.filename}")
+                    continue
+                # identidad exacta de la demo y recorrido completo del dataset (secuencias incluidas, hasta el final)
                 try:
-                    import pydicom
-                    ds = pydicom.dcmread(io.BytesIO(datos), stop_before_pixels=True, force=True)
-                    creadores = {str(e.value).strip() for e in ds if e.tag.is_private and e.tag.element < 0x100}
-                    if creadores - {DEMO_CREADOR.decode()}:
-                        problemas.append(f"{ruta.name}: DICOM con creadores privados ajenos a la demo: {info.filename}")
-                except ImportError:
-                    pass
-            elif es_demo and not info.filename.endswith("/"):
-                pass
+                    ds = pydicom.dcmread(io.BytesIO(datos), force=True)
+                except Exception:
+                    problemas.append(f"{ruta.name}: DICOM ilegible dentro de la demo: {info.filename}")
+                    continue
+                if str(ds.get("PatientName", "")) != DEMO_NOMBRE.decode() or str(ds.get("Manufacturer", "")) != DEMO_FABRICANTE.decode():
+                    problemas.append(f"{ruta.name}: DICOM sin la identidad sintética exacta de la demo: {info.filename}")
+                creadores = {str(e.value).strip() for e in ds.iterall() if e.tag.is_private and e.tag.element < 0x100}
+                if creadores - {DEMO_CREADOR.decode()}:
+                    problemas.append(f"{ruta.name}: DICOM con creadores privados ajenos a la demo: {info.filename}")
     return problemas
 
 
@@ -69,6 +75,9 @@ def main(argv: list[str]) -> int:
     rutas = [Path(a) for a in argv]
     if not rutas:
         print("indica los zips a comprobar (give the zips to check)")
+        return 2
+    if pydicom is None:
+        print("pydicom no está disponible: no se pueden comprobar los adjuntos, así que se rechazan (pydicom required)")
         return 2
     todos: list[str] = []
     for r in rutas:

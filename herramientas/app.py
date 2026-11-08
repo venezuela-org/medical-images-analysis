@@ -1041,7 +1041,7 @@ document.querySelectorAll('#botones-comprobar button').forEach(b => b.onclick = 
   catch (err) { texto('#salida-comprobar', err.message); }
 });
 function pintarRevision(r) {
-  if (r.lista_para_compartir) mensaje('#rev-estado', 'ok', 'Revisión de píxeles: sin hallazgos, vigente. Registrada el ' + r.fecha + (r.revisor ? ' por ' + r.revisor : '') + ' sobre ' + r.archivos_revisados + ' archivos. Lista para compartir.');
+  if (r.lista_para_compartir) mensaje('#rev-estado', 'ok', 'Revisión de píxeles: sin hallazgos, vigente. Registrada el ' + r.fecha + (r.revisor ? ' por ' + r.revisor : '') + ' sobre ' + r.archivos_revisados + ' archivos. La compuerta de metadatos se vuelve a comprobar al empaquetar.');
   else if (r.estado === 'con_hallazgos' && r.vigente) mensaje('#rev-estado', 'error', 'Revisión de píxeles: con hallazgos (' + (r.hallazgos || []).join(', ') + ') el ' + r.fecha + '. Requiere tratamiento antes de compartir.');
   else mensaje('#rev-estado', 'aviso', 'Revisión de píxeles pendiente: ' + (r.detalle || ''));
 }

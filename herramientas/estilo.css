@@ -12,7 +12,7 @@
   --borde-fuerte: #b9b9b2;
   --tinta: #1c1c1a;          /* texto principal */
   --tinta-2: #5f5f5a;        /* texto secundario */
-  --tinta-3: #8a8a84;        /* texto terciario, etiquetas */
+  --tinta-3: #6b6b66;        /* texto terciario, etiquetas (4,9:1 sobre blanco) */
   --imagen-fondo: #000000;   /* las imágenes médicas siempre sobre negro */
   /* color: acento único */
   --acento: #2b6cb0;
@@ -38,7 +38,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --fondo: #151514; --panel: #1e1e1c; --panel-2: #262624; --borde: #35352f; --borde-fuerte: #4a4a43;
-    --tinta: #ebebe6; --tinta-2: #a9a9a1; --tinta-3: #7f7f78;
+    --tinta: #ebebe6; --tinta-2: #a9a9a1; --tinta-3: #9a9a93;
     --acento: #7fb0e6; --acento-tinta: #0f1a26; --acento-suave: #22303f;
     --ok: #74c494; --ok-suave: #1d2f24; --aviso: #e0b64f; --aviso-suave: #352c14;
     --error: #e58876; --error-suave: #3a2420; --info: #9fb8d2; --info-suave: #222a33;

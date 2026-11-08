@@ -119,6 +119,9 @@ def main() -> int:
             ok(not any(any(p in n for p in PRIVADOS) for n in nombres), "ningún archivo privado dentro del zip")
             manifiesto = json.loads(z.read("manifiesto.json"))
             ok(manifiesto.get("revision_pixeles_pendiente") == [], "el manifiesto registra la revisión vigente")
+            rutas_manifestadas = [e["ruta"] for e in manifiesto["archivos"]]
+            ok(len(rutas_manifestadas) == len(set(rutas_manifestadas)), "el manifiesto no repite archivos")
+            ok(set(rutas_manifestadas) == set(nombres) - {"manifiesto.json"}, "el manifiesto enumera exactamente los DICOM del zip")
             for e in manifiesto["archivos"]:
                 ok(hashlib.sha256(z.read(e["ruta"])).hexdigest() == e["sha256"], f"hash del manifiesto coincide: {e['ruta'][-20:]}")
             extraido = trabajo / "extraido"
