@@ -1,0 +1,20 @@
+#!/bin/bash
+# Rechaza el commit si algún archivo preparado es un DICOM o un archivo privado del proyecto.
+# Inspecciona los BYTES DEL ÍNDICE de git (lo que de verdad se va a confirmar), no la copia de trabajo,
+# y recorre las rutas separadas por NUL, así los nombres con espacios no se saltan la comprobación.
+# Límite conocido: detecta el marcador "DICM" en el byte 128; un DICOM sin preámbulo (raro en PACS,
+# posible en exportaciones antiguas) no se reconoce por este medio. La prueba de CI aplica el mismo criterio.
+# Activar una vez: git config core.hooksPath .githooks
+estado=0
+while IFS= read -r -d '' f; do
+  case "$f" in
+    *mapa_seudonimos.json|*indice_origen.jsonl|*raices.json|*corridas.jsonl|*.zip|*.dcm|*.nii|*.nii.gz)
+      echo "archivo privado, paquete o imagen preparado para commit: $f"; estado=1; continue;;
+  esac
+  marca=$(git cat-file blob ":$f" 2>/dev/null | dd bs=1 skip=128 count=4 2>/dev/null)
+  if [ "$marca" = "DICM" ]; then
+    echo "DICOM preparado para commit (según los bytes del índice): $f"; estado=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=AM -z)
+[ $estado -eq 0 ] || echo "Commit rechazado: los datos de pacientes y los archivos privados nunca entran al repositorio."
+exit $estado

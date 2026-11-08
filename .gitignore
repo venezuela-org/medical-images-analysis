@@ -1,0 +1,34 @@
+# Datos de pacientes y derivados: nunca en el repositorio
+*.dcm
+*.nii
+*.nii.gz
+*.zip
+datos-pet/
+datos-pet.nosync/
+originales/
+limpios/
+limpios_PRIVADO/
+limpios_REPORTES/
+PRIVADO/
+paquetes/
+registro.log
+mapa_seudonimos.json
+indice_origen.jsonl
+raices.json
+corridas.jsonl
+
+# Entorno
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# Construcción de paquetes
+herramientas/build/
+herramientas/dist/
+herramientas/*.spec
+humo/
+demo-sintetico/
+*.log

@@ -1,0 +1,60 @@
+  DRO_0_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_1_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_1_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_1_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_1_2      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_2_0      OK    mín 0.199 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_2_1      OK    mín 0.198 med 0.999 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_2_2      OK    mín 0.200 med 0.998 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_3        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_4        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_5        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_6_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_6_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_2_6_2      OK    mín 0.199 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_1        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_2_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_2_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_2_2      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_2_3      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_3_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_3_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_4_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_4_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_4_2      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_4_3      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_5_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_5_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_5_2      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_3_5_3      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_1        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_2        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_3        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_4        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_4_5        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_5_0        OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_7_0_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_7_1_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_7_2_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_7_3_0      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_7_3_1      OK    mín 0.200 med 1.000 máx 4.000  (esperado 0.20 1.00 4.00)
+  DRO_error_2_0  OK    error esperado: falta el peso del paciente
+  DRO_error_2_1  OK    error esperado: falta el peso del paciente
+  DRO_error_2_2  OK    error esperado: GML con otro tipo de SUV requiere peso, talla y sexo válidos
+  DRO_error_2_3  OK    error esperado: GML con otro tipo de SUV requiere peso, talla y sexo válidos
+  DRO_error_2_4  OK    error esperado: GML con otro tipo de SUV requiere peso, talla y sexo válidos
+  DRO_error_2_5  OK    error esperado: GML con otro tipo de SUV requiere peso, talla y sexo válidos
+  DRO_error_2_6  OK    error esperado: CNTS sin factores Philips utilizables
+  DRO_error_2_7  OK    error esperado: unidades PROPCNTS no admitidas
+  DRO_error_3_0  OK    error esperado: falta la dosis administrada o no es positiva
+  DRO_error_3_1  OK    error esperado: falta la dosis administrada o no es positiva
+  DRO_error_3_2  OK    error esperado: falta Actual Frame Duration para el retrocálculo
+  DRO_error_4_0  OK    error esperado: falta la hora de administración
+  DRO_error_4_1  OK    error esperado: solo hay hora de administración y el radionúclido es de vida larga
+  DRO_error_4_2  OK    error esperado: fechas de administración y referencia incoherentes con un radionúclido de vida larga
+  DRO_error_5_0  OK    error esperado: falta la vida media del radionúclido
+
+Validación IBSI-SUV: 58 correctos, 0 fallos de 58 objetos de referencia

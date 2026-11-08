@@ -1,0 +1,34 @@
+# Comprobaciones en cada pull request: pruebas sintéticas (Linux y Windows 10 compatible) y validación IBSI-SUV con datos públicos.
+# Checks on every pull request: synthetic tests on Linux and Windows, and IBSI-SUV validation on public reference objects.
+name: comprobaciones
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  pruebas:
+    name: Pruebas sintéticas (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --with pytest --with pydicom --with numpy --with fastapi --with uvicorn --with pillow --with nibabel pytest -q pruebas
+
+  suv:
+    name: Validación IBSI-SUV (58 objetos de referencia públicos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Descargar los objetos de referencia (oncoray/suv_computation)
+        run: |
+          curl -sL -o ref.zip https://codeload.github.com/oncoray/suv_computation/zip/refs/heads/main
+          unzip -q ref.zip
+      - run: uv run herramientas/suv.py validar suv_computation-main/DRO

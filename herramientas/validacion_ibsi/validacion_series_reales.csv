@@ -1,0 +1,17 @@
+PatientDir,PatientName,SUVmax,SUVmean,estrategia
+validation_01,ACRIN-FLT-Breast_040,5.636,4.952,estrategia: BQML; retrocálculo general (adquisición + Tave menos FRT)
+validation_02,ACRIN-FLT-Breast_049,7.747,5.854,estrategia: BQML; retrocálculo general (adquisición + Tave menos FRT)
+validation_03,ACRIN-NSCLC-FDG-PET-003,2.863,1.787,estrategia: BQML; privada GE (0009;100D)
+validation_04,ACRIN-NSCLC-FDG-PET-020,3.337,2.803,estrategia: GML = SUVbw directo
+validation_05,ACRIN-NSCLC-FDG-PET-049,3.029,1.875,estrategia: BQML; adquisición igual a serie
+validation_06,ACRIN-NSCLC-FDG-PET-090,,,no calculable: falta el peso del paciente
+validation_07,ACRIN-NSCLC-FDG-PET-108,4.101,2.542,estrategia: BQML; privada GE (0009;100D)
+validation_08,ACRIN-NSCLC-FDG-PET-144,,,no calculable: falta el peso del paciente
+validation_09,ACRIN-NSCLC-FDG-PET-157,1.835,1.534,estrategia: CNTS por factor de concentración de actividad Philips; adquisición igual a serie; CNTS por factor de concentración de actividad Philips; retrocálculo general (adquisición + Tave menos FRT)
+validation_10,ACRIN-NSCLC-FDG-PET-195,3.261,2.104,estrategia: BQML; adquisición igual a serie
+validation_11,ACRIN-NSCLC-FDG-PET-201,,,no calculable: falta Actual Frame Duration para el retrocálculo
+validation_12,ACRIN-NSCLC-FDG-PET-234,,,no calculable: falta la dosis administrada o no es positiva
+validation_13,QIN-BREAST-01-0028,2.480,1.957,estrategia: BQML; retrocálculo GE (adquisición menos FRT)
+validation_14,R01-150,,,no calculable: CNTS sin factores Philips utilizables
+validation_15,STS_048,1.936,0.837,estrategia: BQML; adquisición igual a serie; BQML; retrocálculo GE (adquisición menos FRT)
+validation_16,TCGA-VP-A87D,7.395,5.737,estrategia: BQML; retrocálculo general (adquisición + Tave menos FRT)

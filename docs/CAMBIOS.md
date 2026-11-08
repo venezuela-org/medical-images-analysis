@@ -1,0 +1,193 @@
+# Cambios 0.2 / Changes 0.2
+
+Respuesta a la revisión independiente del 7 de noviembre de 2026. Cada hallazgo se cerró con un cambio y con una prueba que lo reproduce primero y lo comprueba después. Las pruebas usaron copias de IM136 e IM0 a IM9 y variantes sintéticas con valores `ZZ`; ningún original se modificó ni salió de la máquina.
+
+Response to the independent review of 7 November 2026. Each finding was closed with a change and with a test that reproduced it first and checked it afterwards.
+
+En la siguiente tabla se ve el hallazgo, el cambio y cómo se probó (finding, change, test).
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | `..` como paciente alcanzaba el mapa privado | Solo seudónimos `^[A-Z0-9]{2,12}-\d{4}$`, resueltos y contenidos en `limpios/`, sin enlaces simbólicos; cada identificador se valida antes de tocar nada | `..`, `../PRIVADO`, `ANON-0001/..`, `PRIVADO`, `anon-0001` → 400; enlace simbólico como paciente → 400 |
+| 2 | Archivos no revisados entraban al zip | `verificar` revisa todos los archivos, de cualquier extensión; el empaquetado rechaza cualquier archivo que no sea `.dcm` o `serie.json`; manifiesto SHA-256 de los bytes exactos, zip temporal releído y comparado antes de publicar | `notes.txt` dentro del paciente → 409, nada escrito; `crudo.dcm` (DICOM sin limpiar) → la compuerta lista 20 problemas |
+| 3 | Identidad sobrevivía en campos no listados y en secuencias | Lista cerrada de texto permitido; todo otro LO, LT, ST, UT, SH, UC y PN se elimina en cualquier nivel; etiquetas públicas desconocidas eliminadas; objetos no soportados (SR, SC, documentos…) en cuarentena; el verificador aplica la misma política pero de forma independiente | `TextValue`, `PatientTransportArrangements`, `RequestedProcedureLocation`, `FillerOrderNumberImagingServiceRequest`, `ClinicalTrialSubjectID`, `CommentsOnThePerformedProcedureStep` y `TextValue` anidado: todos ausentes tras limpiar; búsqueda binaria de cada cadena `ZZ` en los archivos limpios: ninguna |
+| 4 | Preámbulo y metadatos de archivo conservaban identidad | Preámbulo a cero; metadatos reconstruidos desde cero (sin títulos AE ni información privada); el verificador lee los 128 bytes y los metadatos | Preámbulo con `ZZ IDENTITY` y `SourceApplicationEntityTitle` → ambos ausentes; preámbulo alterado a mano en un archivo limpio → la compuerta lo detecta |
+| 5 | `BurnedInAnnotation=YES` solo avisaba | Cuarentena; el verificador lo trata como problema | Archivo con `YES` → cuarentena, no copiado |
+| 6 | Pacientes de distintos emisores se fusionaban | Clave emisor + ID; aviso si el mismo ID trae nombre o fecha de nacimiento distintos | Mismo ID con dos emisores → dos seudónimos |
+| 7 | Series distintas se mezclaban | Carpetas derivadas del `SeriesInstanceUID` nuevo; etiqueta de número solo como sufijo | Dos series con número 7 → dos carpetas |
+| 8 | Reimportar duplicaba instancias | Nombre de archivo derivado del `SOPInstanceUID` nuevo; mismo contenido se omite; contenido distinto con el mismo UID va a cuarentena | Copia repetida → 1 duplicado omitido; reimportar todo por la app → 0 escritos, 11 duplicados |
+| 9 | Una corrida fallida perdía el mapa | Mapa escrito de forma atómica al aparecer cada paciente, antes del primer archivo; permisos 0600/0700; cada archivo en `try`, cuarentena y la corrida sigue; cerrojo `.corriendo` | Archivo roto en medio de la corrida → cuarentena, mapa presente, 5 archivos limpios; un elemento privado GE mal formado en los PET reales ya no detiene la corrida |
+| 10 | Se reescribían UID semánticos | Solo se reescriben los identificadores de instancia (lista cerrada) bajo una raíz de proyecto; el verificador exige esa raíz | `CodingSchemeUID` y `ContextGroupVersion` intactos; `ReferencedSOPInstanceUID` reescrito |
+| 11 | Enlaces simbólicos y HTML en la página | Sin seguir enlaces en ninguna lectura; `textContent` en toda la interfaz; CSP sin código en línea; títulos de diálogo fijos | `<img onerror>` en `SeriesDescription` queda como texto sin `<>`; cabecera CSP presente |
+| otros | Prefijo distinto entre limpiar y verificar; zips del mismo minuto se pisaban; `/` y `/docs` sin token; rutas en reportes | Prefijo guardado en `.politica.json`; nombre de zip con segundos y sufijo aleatorio, publicación atómica; token en toda ruta y `/docs` desactivado; reportes sin rutas ni valores | Dos paquetes en el mismo segundo → dos zips; `/`, `/static/app.js` sin token → 401; `/docs` → 404 |
+| PET | La afirmación sobre el SUV no estaba probada | Factor SUV de peso corporal calculado antes y después (BQML, convención QIBA); si cambia, cuarentena; lista permitida de factores privados Philips | 10 cortes PET GE Discovery LS: factor idéntico en 10/10. La comparación numérica sobre un volumen completo y emparejado queda para el paso 3 |
+
+Lo que sigue abierto: inspección de píxeles (texto grabado sin etiqueta, rostros), detección de carpetas sincronizadas solo por nombre, vista previa sin geometría, factores privados de otros fabricantes.
+
+Still open: pixel inspection (unflagged burned-in text, faces), sync detection by path name only, non-geometric preview, other vendors' private quantification factors.
+
+
+# Cambios 0.3 / Changes 0.3
+
+Respuesta a la segunda ronda de revisión (8 de noviembre de 2026). Las comprobaciones de 0.2 se repitieron sin regresiones.
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | La página no podía cargar su JavaScript ni su CSS (los recursos estáticos exigían el token) | `app.js` y `app.css` se sirven sin token: son código, sin datos. La página y la API siguen exigiéndolo | `/static/app.js` y `/static/app.css` → 200 sin token; `/` y `/api/estado` → 401; `/docs` → 404 |
+| 2 | `serie.json` se aceptaba por su nombre y entraba al zip sin inspección | `serie.json` desaparece. `verificar` solo acepta DICOM, más `.politica.json` validado contra su esquema en la raíz. El empaquetado solo copia DICOM; los reportes viven en `limpios_REPORTES/` y no se copian | `serie.json` con identidad plantado en un paciente → 409, nada escrito |
+| 3 | Identidad sobrevivía en `EncapsulatedDocument`, `RetrieveURL`, `CodeMeaning`, un factor Philips con texto y un creador privado huérfano | URI eliminadas; binarios eliminados salvo píxeles y paletas; `CodeMeaning` reemplazado por `designador valor`; factores privados solo si son numéricos; creadores privados eliminados salvo los permitidos con algún factor presente. El verificador comprueba cada regla | Fixture con los cinco casos: ninguna cadena sintética sobrevive; el verificador lista los cinco hallazgos sobre el fixture sin limpiar |
+| 4 | Un factor SUV cambiado se reportaba pero el archivo se escribía igual | Cuarentena y `continue` antes de escribir; rangos de cordura para peso, dosis, vida media e intervalo | Calculadora forzada a resultados distintos sobre los 10 PET → 0 escritos, 10 en cuarentena, 0 archivos en disco |
+| 5 | Verificación y hash miraban momentos distintos | Cada archivo se lee una sola vez; esos bytes se verifican, se hashean y se escriben al zip; el zip se relee y se compara antes de publicarse | DICOM crudo plantado como `.dcm` en un paciente limpio → 409 con la lista de etiquetas, nada publicado |
+
+Residuales declarados: CS y numéricos sin inspección de contenido; clases Enhanced y Segmentation no validadas con muestras reales; píxeles sin revisar; detección de iCloud "Escritorio y Documentos" fuera del alcance de la heurística.
+
+
+# Cambios 0.3.1 / Changes 0.3.1
+
+Respuesta a la tercera ronda (8 de noviembre de 2026).
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | El verificador se detenía en `PixelData` y no veía `DataSetTrailingPadding` ni nada posterior | Lectura completa en `verificar` y en el empaquetado; cualquier elemento después de los píxeles o en los grupos FFFA+ es un problema; el limpiador los elimina | Relleno con identidad después de los píxeles: eliminado al limpiar; plantado en un archivo limpio, la compuerta lo lista y rechaza |
+| 2 | `emparejar` declaraba par coherente con datos ausentes, inconsistentes, desplazados o duplicados | Reescrito: tres veredictos (candidato compatible, inconsistente, información insuficiente); cada imagen validada contra su serie; identificadores completos para comparar; solape tridimensional de los campos de visión; duplicados y posiciones ausentes cambian el veredicto; etiquetas con sal por corrida; sin nombres de carpeta ni horas | Los siete casos del revisor: coherente → compatible; sin posiciones → insuficiente; sin ID ni estudio → insuficiente; una imagen de otro paciente → inconsistente; CT desplazado 1000 mm → inconsistente; un PET sin posición → insuficiente; posición PET duplicada → inconsistente |
+| 3 | Dos resultados verdes antes y después no completan el paso 3 | Nuevo `cotejar.py`: original contra limpio por píxeles idénticos, geometría y cuantificación campo a campo, biyección de series, estudios, marcos y pacientes, desplazamiento de fechas uniforme | IM136 + 10 PET: 11 de 11 coinciden; con una imagen limpia alterada y una copia extra: diferencias detectadas |
+
+Residuales declarados: la validación numérica del SUV sobre un volumen completo sigue pendiente de un caso real emparejado; CS y numéricos sin inspección de contenido; píxeles sin revisar.
+
+
+# Cambios 0.3.2 / Changes 0.3.2
+
+Respuesta a la cuarta ronda (8 de noviembre de 2026).
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | `cotejar` emparejaba por hash de píxeles: dos instancias distintas con píxeles iguales se confundían; cambios de interpretación fotométrica o de fecha-hora pasaban; faltantes se daban por cuarentena sin registro | Reescrito: correspondencia por el mapa privado (cada original se vuelve a limpiar en memoria y se compara byte a byte con el limpio en su ruta derivada); cada original sin limpio debe tener registro de cuarentena en el reporte; omitidos cotejados contra el reporte; limpios sin original son diferencia | Dos originales con SOP distintos y píxeles idénticos, uno borrado → DIFERENCIAS; `PhotometricInterpretation` cambiada → DIFERENCIAS; `AcquisitionDateTime` cambiada → DIFERENCIAS; limpio borrado sin registro → DIFERENCIAS; limpio extra → DIFERENCIAS; base de 11 y de 13 imágenes → COINCIDE |
+| 2 | Siete bytes mal formados al final de un archivo limpio pasaban la compuerta y el empaquetado | `verificar` y el empaquetado exigen que la serialización canónica reproduzca exactamente los bytes leídos | Siete bytes añadidos a un limpio → la compuerta lo descalifica y el paquete se rechaza con 409; los 11 limpios normales siguen pasando |
+| 3 | El seudónimo no es siempre `ANON-0001` cuando se reutiliza un mapa | `cotejar` imprime los seudónimos del caso; la secuencia documentada los toma de ahí | Salida del cotejo: `seudónimos del caso: ANON-0001, ANON-0002` |
+
+Residuales declarados: validación numérica de SUV sobre un volumen completo pendiente de un caso real; CS y numéricos sin inspección de contenido; píxeles sin revisar.
+
+
+# Cambios 0.4 / Changes 0.4
+
+Paso 4 de la revisión: cuantificación PET validada contra referencias externas, y una corrección de política derivada de ella.
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| `suv.py` nuevo | SUVbw según el manual IBSI-SUV de OncoRay, cuadro por cuadro, con todas las ramas de unidades, corrección de decaimiento, hora de inicio del escaneo, hora de administración y Enhanced PET | 58 de 58 objetos de referencia digitales correctos (43 valores exactos, 15 errores esperados); 16 series reales de TCIA calculadas o rechazadas por regla, con los valores guardados en `validacion_ibsi/` |
+| Política `pet-ct-local/0.4` | Se conservan, desplazadas, las fechas-hora privadas de referencia de decaimiento de GE (`0009,xx0D`) y Siemens (`0071,xx22`), porque son la primera fuente de la hora de inicio del escaneo y la copia limpia 0.3 las perdía | En los 10 cortes PET GE: factor y estrategia idénticos entre original y copia limpia (`privada GE (0009,100D)`); la fecha se desplaza igual que `SeriesDate` y la hora se conserva; `verificar`, `cotejar` y todos los fixtures anteriores siguen pasando |
+| `cotejar` 0.2.1 | El conteo de archivos sobrantes se limita a las carpetas de serie del caso; otros casos del mismo mapa no cuentan | Diez casos reales en una misma raíz: diez COINCIDE |
+
+Al pasar de la política 0.3 a la 0.4 hay que borrar `limpios/` y volver a limpiar; el mapa privado se conserva, así que los seudónimos, fechas y UID se mantienen.
+
+
+# Cambios 0.4.1 / Changes 0.4.1
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| Lanzadores de doble clic | `PET-CT local.command` (macOS) y `PET-CT local.bat` (Windows): instalan `uv` si falta, arrancan la aplicación y abren el navegador; carpeta de datos `datos-pet` en la carpeta del usuario, configurable con `PETCT_DATOS` | El `.command` probado bajo bash: instala dependencias, arranca y sirve la página con token. El `.bat` no se ha probado en Windows todavía |
+| Consola UTF-8 | Todos los scripts fuerzan salida UTF-8, para que los acentos y símbolos se vean en la consola de Windows | Sintaxis verificada; sin prueba en Windows todavía |
+
+
+# Cambios 0.5 / Changes 0.5
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| Panel "Antes y después" en Estudios | Imagen original y limpia lado a lado con la misma ventana; comprobación SHA-256 de píxeles; tarjetas con lo que se hizo (nombre e ID → seudónimo, fecha de nacimiento vacía, fechas desplazadas, UID reescritos, etiquetas eliminadas, sin cambio) y lista completa por acción. Solo nombres de etiqueta; los valores originales nunca salen del servidor local | Sobre IM136 y un corte PET: píxeles idénticos, 140 y 312 privadas eliminadas, 6 y 5 fechas desplazadas, 5 UID reescritos; búsqueda de los valores originales (nombre, ID, nacimiento, institución, operador, fecha) en la respuesta: ninguno presente |
+| Índice privado limpio → original | `anonimizar.py limpiar` escribe `PRIVADO/indice_origen.jsonl`, una línea por archivo, permisos 0600; es lo que permite al panel encontrar el original | 11 líneas para 11 archivos; `cotejar` sigue en COINCIDE |
+
+
+# Cambios 0.5.1 / Changes 0.5.1
+
+Respuesta a la revisión del panel antes/después.
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | La app leía el índice en `PRIVADO` y la línea de comandos lo escribía junto a su mapa (`limpios_PRIVADO`) | La app usa `limpios_PRIVADO`, la misma carpeta que la línea de comandos, y lee el índice de ambas por compatibilidad; el índice guarda la ruta limpia relativa a `limpios/`, así sobrevive a mover la carpeta | Datos limpiados por línea de comandos y copiados a otra carpeta de trabajo: el panel y `cotejar` desde la app funcionan sin reimportar |
+| 2 | Reimportar archivos idénticos no creaba índice | El duplicado verificado también se indexa; las líneas no se repiten | Índice borrado, reimportación: 0 imágenes escritas, 11 duplicados, índice reconstruido con 11 líneas; una tercera corrida no añade líneas |
+| 3 | Respuestas fuera de orden al navegar rápido mezclaban series | Número de secuencia por petición; la respuesta se descarta si cambió la serie, el corte o la ventana; al abrir otra serie el panel se vacía | Lógica revisada; la condición compara serie, corte y ventana antes de pintar |
+| 4 | Redacción: el hash compara los bytes de PixelData, no el archivo completo | Tarjeta y README dicen "bytes de PixelData idénticos, SHA-256" | Texto revisado |
+| + | Botones de flujo en Estudios | Emparejar, Cotejar con el original (con la carpeta de entrada registrada en el índice) y SUV de la serie, con su salida en pantalla | Los tres probados sobre datos limpiados por línea de comandos: emparejar (sin par, correcto), cotejar COINCIDE, suv con factor y máximo |
+| + | `ventana.py` | Ventana nativa opcional con pywebview, experimental | Sin ejecutar en Mac ni Windows todavía |
+
+
+# Cambios 0.5.2 / Changes 0.5.2
+
+Respuesta a la revisión de migración.
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | Reimportar archivos limpiados por una versión anterior los enviaba a cuarentena por el nombre de versión de los metadatos | El nombre de versión pasa a ser estable y ligado a la política (`PETCTLOCAL_0.4`); en la deduplicación, una diferencia limitada a ese nombre se resuelve actualizando el archivo en el sitio tras comprobar que la serialización canónica coincide; `cotejar` tolera y señala la misma diferencia | 11 archivos con `ANONIMIZAR_0.4.2` simulado: cotejar COINCIDE con aviso; reimportación: 0 escritos, 11 actualizados, 0 cuarentena; tercera corrida: 11 duplicados; un cambio real de contenido sigue en cuarentena |
+| 2 | Mover el espacio de trabajo con sus originales dejaba el panel sin originales | El índice guarda el original relativo a su carpeta de entrada y la carpeta de entrada relativa a la carpeta de trabajo cuando está dentro; la app resuelve ambas; botón para reubicar la carpeta de originales (`raices.json`) | Espacio de trabajo movido completo: panel y cotejo funcionan; originales movidos aparte: el panel lo detecta, la reubicación los recupera y cotejo vuelve a COINCIDE |
+
+Residual: `ventana.py` sigue sin ejecutarse en Mac ni en Windows.
+
+
+# Cambios 0.5.3 / Changes 0.5.3
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | La excepción de versión reserializaba el archivo existente antes de comparar y por eso descartaba bytes sobrantes: siete bytes añadidos pasaban como "versión" en `cotejar` y la reimportación los borraba contándolos como actualización | `solo_cambia_version` exige primero que la serialización canónica del existente reproduzca sus bytes exactos, luego que el nombre de versión sea distinto del actual, y solo entonces iguala ese nombre y compara | Siete bytes añadidos: `cotejar` DIFERENCIAS y reimportación → cuarentena por contenido distinto; versión antigua simulada en 11 archivos: 11 actualizados, COINCIDE; misma versión con `PhotometricInterpretation` cambiada: cuarentena; suites anteriores sin regresión |
+
+
+# Cambios 0.6 / Changes 0.6
+
+Respuesta a la lista de mejoras priorizada (8 de noviembre de 2026). Los números remiten a la tabla del revisor.
+
+| Prioridad | Mejora | Estado | Prueba |
+|---|---|---|---|
+| 1 | Impedir importar el árbol de salida | Hecho: la línea de comandos y la app rechazan entradas que se solapan con la copia limpia, la carpeta privada, los reportes o los paquetes, con rutas resueltas | Salida dentro de la entrada → código 2; desde la app → 400 |
+| 1 | Detectar entradas ya anonimizadas | Hecho: se cuentan aparte como "ya anonimizados" y no reciben seudónimo ni se copian | La copia limpia como entrada: 11 ya anonimizados, 0 escritos, mapa con 0 pacientes |
+| 1 | Registrar los ajustes reales de la importación | Hecho: `limpios_PRIVADO/corridas.jsonl`, una línea inmutable por corrida con entrada, salida, mapa, política, prefijo, opción y conteos | Registro presente tras cada corrida |
+| 1 | Actualizaciones de política explícitas | Parcial: la actualización de etiqueta de versión en el sitio existe (0.5.3); la reconstrucción por cambio de política sigue pendiente de diseño | |
+| 1 | Comparar SUV original / limpio | Hecho: `suv.py comparar` y botón en Estudios; correspondencia por el índice privado, geometría y orden, cálculo por separado, valores finitos, diferencia máxima, vóxeles distintos, factores e intervalos, reporte JSON | 10 cortes: 10/10 exactos, 0 vóxeles distintos; un vóxel alterado → DIFERENCIAS |
+| 1 | Flujo de revisión de píxeles | Primera versión: registro por paciente (sin hallazgos / con hallazgos: texto grabado, rostro, otro; revisor; notas) ligado a los hashes de todos sus archivos; se invalida si cambian | Registro, vigencia, invalidación tras cambiar un archivo |
+| 1 | Separar paquete creado de revisión completada | Hecho: estado por paciente en Enviar, aviso en la respuesta y `revision_pixeles` en el manifiesto | Paquete con un paciente sin revisar: creado y marcado pendiente |
+| 2 | Resaltar fila seleccionada; alcance explícito; refrescar tras importar | Hecho | Lógica revisada en la interfaz |
+| 2 | Progreso, selector de carpeta de trabajo, tabla de todos los pacientes, almacenamiento | Pendientes, como issues | |
+| 3 | Lanzamiento nativo y Windows | Pendientes de prueba en plataforma | |
+
+Además: repositorio `venezuela-org/medical-images-analysis` con pruebas sintéticas (8 casos, sin datos reales) y validación IBSI-SUV en integración continua.
+
+
+# Cambios 0.6.1 / Changes 0.6.1
+
+Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | `suv.py comparar` solo enumeraba los limpios presentes: un corte borrado desaparecía del denominador; el orden no se validaba | Correspondencia en ambos sentidos antes de comparar: serie original completa (todos los archivos de las carpetas de origen con el mismo SeriesInstanceUID), índice privado y carpeta limpia; faltantes, sobrantes, duplicados y mal mapeados son problemas; orden físico sin duplicados y números de instancia coherentes y iguales entre original y limpio; el veredicto exige correspondencia completa | Corte limpio borrado → "1 faltante", DIFERENCIAS; InstanceNumber cambiado → "1 instancia distinta", DIFERENCIAS; original no importado → faltante; vóxel alterado → detectado; 10 cortes reales → IDENTICO; 5 pruebas sintéticas en CI |
+| 2 | La revisión de píxeles aceptaba "sin hallazgos" con un hallazgo marcado y sin revisor | Regla única en API e interfaz: sin hallazgos exige lista vacía y revisor; con hallazgos exige al menos uno; cualquier hallazgo registrado deja al paciente pendiente para compartir, diga lo que diga la etiqueta; un registro contradictorio en disco se lee como pendiente | 400 en los tres casos inválidos; con hallazgos → pendiente en el paquete; registro contradictorio escrito a mano → pendiente; 5 pruebas sintéticas en CI |
+| 3 | La respuesta de la revisión podía pintarse tras cambiar de paciente | Secuencia por petición y comprobación de la selección; el formulario se vacía al abrir otra serie; botones deshabilitados cuando la combinación es contradictoria | Lógica revisada |
+| 4 | Sin pruebas de las funciones nuevas | 11 pruebas nuevas (comparación SUV, reglas de revisión, ausencia de DICOM en el repositorio) además de las 8 de la política; CI en Linux y Windows | 19 pruebas pasan |
+| + | El `.gitignore` no detiene archivos DICOM sin extensión | Gancho de pre-commit que inspecciona los bytes de cada archivo preparado y prueba de CI que recorre el repositorio | Prueba incluida |
+
+
+# Cambios 0.6.2 / Changes 0.6.2
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | El gancho de pre-commit leía la copia de trabajo y rutas separadas por espacios: un DICOM con espacio en el nombre, o preparado y luego sustituido en disco por texto, pasaban | Rutas separadas por NUL (`-z`) y bytes del índice de git (`git cat-file blob :ruta`); limitación documentada: busca el marcador DICM del byte 128 | 3 pruebas: DICOM con espacio en el nombre → rechazado; DICOM en el índice con copia de trabajo sustituida → rechazado; archivos normales → aceptados |
+| 2 | El orden físico no afectaba al veredicto: el mismo InstanceNumber alterado en original y limpio daba IDENTICO | El veredicto exige correspondencia completa, orden y geometría correctos y píxeles idénticos; los tres se informan por separado; geometría ausente es un problema | Pruebas: orden incoherente en ambos lados → DIFERENCIAS con píxeles idénticos; geometría ausente → DIFERENCIAS; los 10 cortes reales siguen en IDENTICO |
+| 3 | El guardado de la revisión solo comprobaba la selección en el éxito y no bloqueaba envíos solapados | Secuencia y selección comprobadas en éxito, error y cierre; envíos solapados bloqueados; cambiar de serie invalida respuestas pendientes | Lógica revisada |
+| + | Redacción | Un runner `windows-latest` no es una prueba del Windows 10 de Miguel; el README lo dice así | |
+
+
+# Cambios 0.7.0 / Changes 0.7.0
+
+| Qué / What | Detalle / Detail | Prueba / Test |
+|---|---|---|
+| Punto de entrada único | `lanzador.py`: abre la aplicación o ejecuta una herramienta como subcomando; `app.py` invoca las herramientas a través del propio ejecutable cuando va congelado | Flujo completo (demo, limpiar, cotejar, emparejar, suv comparar, versión) desde el código fuente y desde un ejecutable PyInstaller construido en Linux; servidor congelado probado por HTTP, importación por subproceso congelado, comparación SUV y empaquetado |
+| Caso sintético de demostración | `demo.py` y botón "Crear caso de demostración": CT y PET inventados con identidad ficticia, misma rejilla y marco, lesión caliente, atributos de dosis | El caso recorre todo el flujo: COINCIDE, CANDIDATO COMPATIBLE, IDENTICO |
+| Flujo de publicación | `publicar.yml`: pruebas, paquetes Windows y macOS, prueba de humo del ejecutable en cada runner, caso sintético, comprobación de adjuntos sin archivos privados, borrador de Release con notas e instrucciones | Pendiente de su primera ejecución en GitHub; el constructor (`empaquetar.sh`) probado en Linux |
+| Documentación | `docs/instalacion.md` (español, para la Release), `docs/lanzamientos.md` (proceso), `docs/notas-de-version/v0.7.0.md` | |
+| Consola | Salida con búfer por línea en todas las herramientas, para que el ejecutable muestre la dirección y el token de inmediato | Visto en el ejecutable congelado |
+
+
+# Cambios 0.7.1 / Changes 0.7.1
+
+| # | Hallazgo / Finding | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 1 | La prueba de orden elegía un corte cualquiera; si tocaba un extremo, el orden seguía válido y la prueba fallaba sin motivo | La prueba elige el corte del medio por posición física y rompe el orden a propósito | Suite ejecutada tres veces: 25 de 25 cada vez |
+| 2 | La geometría solo se exigía en conjunto: un par sin ImagePositionPatient pasaba si otros la traían | Cada par debe traer posición, orientación y espaciado en ambos lados; el conteo `geometria_incompleta` forma parte del resultado de orden y geometría | Un solo corte sin posición → DIFERENCIAS con correspondencia completa; todos sin posición → DIFERENCIAS |
+| 3 | Un problema de orden también marcaba como incompleta la correspondencia | Tres resultados independientes: correspondencia (inventario), orden y geometría, igualdad numérica; cada problema se imprime bajo su apartado y el veredicto exige los tres | Orden incoherente en ambos lados: correspondencia sí, orden NO, píxeles sí, DIFERENCIAS |
