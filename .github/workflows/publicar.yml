@@ -59,9 +59,14 @@ jobs:
         run: |
           cp docs/instalacion.md "herramientas/dist/PET-CT local/LEEME.md"
           if [ "${{ matrix.nombre }}" = "macos" ]; then
-            printf '#!/bin/bash\ncd "$(dirname "$0")"\n./"PET-CT local"\n' > "herramientas/dist/PET-CT local/Abrir PET-CT local.command"
+            # Lanzador: quita la marca de cuarentena que macOS pone a todo lo descargado (sin ella, Gatekeeper
+            # bloquea las bibliotecas del paquete con "Python.framework está dañado") y arranca la aplicación.
+            printf '%s\n' '#!/bin/bash' 'cd "$(dirname "$0")"' 'xattr -dr com.apple.quarantine . 2>/dev/null || true' 'exec ./"PET-CT local"' > "herramientas/dist/PET-CT local/Abrir PET-CT local.command"
             chmod +x "herramientas/dist/PET-CT local/Abrir PET-CT local.command"
-            codesign --force --deep --sign - "herramientas/dist/PET-CT local/PET-CT local" || true
+            # Firma ad hoc de cada binario del paquete (bibliotecas, frameworks y ejecutable), para que las firmas sean válidas
+            find "herramientas/dist/PET-CT local/_internal" -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) -exec codesign --force --sign - {} \; 2>/dev/null || true
+            find "herramientas/dist/PET-CT local/_internal" -type d -name "*.framework" -exec codesign --force --deep --sign - {} \; 2>/dev/null || true
+            codesign --force --sign - "herramientas/dist/PET-CT local/PET-CT local" || true
           fi
       - name: Comprimir
         shell: bash
