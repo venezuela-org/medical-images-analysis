@@ -87,7 +87,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")

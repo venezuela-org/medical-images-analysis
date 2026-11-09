@@ -72,7 +72,8 @@ jobs:
         shell: bash
         run: |
           cd herramientas/dist
-          if [ "${{ matrix.nombre }}" = "windows" ]; then 7z a -tzip "../../PET-CT-local-${GITHUB_REF_NAME}-windows.zip" "PET-CT local" > /dev/null; else zip -qry "../../PET-CT-local-${GITHUB_REF_NAME}-macos.zip" "PET-CT local"; fi
+          # Nombres sin versión: los botones del README apuntan a releases/latest/download/<nombre> y no cambian con cada versión
+          if [ "${{ matrix.nombre }}" = "windows" ]; then 7z a -tzip "../../PET-CT-local-windows.zip" "PET-CT local" > /dev/null; else zip -qry "../../PET-CT-local-macos.zip" "PET-CT local"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: paquete-${{ matrix.nombre }}

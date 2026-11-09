@@ -4,6 +4,22 @@ Análisis de imágenes médicas PET/CT para investigación: anonimización en or
 
 PET/CT medical image analysis for research: anonymization at the source, CT + PET pairing, validated SUV quantification, and later lesion segmentation and description. English summary below.
 
+## Descargar PET/CT local
+
+La aplicación de escritorio, lista para doble clic, sin instalar nada más. Elige tu sistema:
+
+[![Descargar para Windows 10](https://img.shields.io/badge/Windows%2010-Descargar-2b6cb0?style=for-the-badge)](https://github.com/venezuela-org/medical-images-analysis/releases/latest/download/PET-CT-local-windows.zip)
+[![Descargar para Mac con Apple Silicon](https://img.shields.io/badge/Mac%20Apple%20Silicon-Descargar-2b6cb0?style=for-the-badge)](https://github.com/venezuela-org/medical-images-analysis/releases/latest/download/PET-CT-local-macos.zip)
+[![Descargar los datos de demostración](https://img.shields.io/badge/Datos%20de%20demostraci%C3%B3n-Descargar-5f5f5a?style=for-the-badge)](https://github.com/venezuela-org/medical-images-analysis/releases/latest/download/datos-demo-sinteticos.zip)
+
+| Descarga | Qué es |
+|---|---|
+| Windows 10 | Carpeta `PET-CT local` con `PET-CT local.exe`. Descomprimir fuera de OneDrive y doble clic. |
+| Mac (M1 a M4) | Carpeta `PET-CT local` con `Abrir PET-CT local.command`. Descomprimir fuera de iCloud Drive y doble clic. |
+| Datos de demostración | Un CT y un PET inventados, con identidad ficticia, para practicar sin datos de pacientes. La aplicación también los crea con un botón. |
+
+Instrucciones paso a paso: [`docs/instalacion.md`](docs/instalacion.md) y la guía rápida en PDF adjunta a cada versión. Todas las versiones, con sus notas: [Releases](https://github.com/venezuela-org/medical-images-analysis/releases).
+
 ## Reglas del repositorio
 
 - Aquí viven el código, las pruebas, la documentación y los reportes de conteos. Nunca imágenes ni datos de pacientes, ni mapas de seudónimos, ni índices privados. El `.gitignore` ayuda, pero los archivos DICOM sin extensión (`IM0`, `IM1`) no se pueden excluir por nombre: por eso hay un gancho de pre-commit que inspecciona los bytes de cada archivo preparado tal como están en el índice de git (rutas separadas por NUL, así los espacios no lo esquivan) y una prueba en integración continua que recorre todo el repositorio. Ambos buscan el marcador DICM del byte 128; un DICOM sin preámbulo no se reconoce por ese medio. Los datos reales viven siempre fuera del repositorio.
@@ -12,7 +28,7 @@ PET/CT medical image analysis for research: anonymization at the source, CT + PE
 
 ## Versiones y distribución
 
-Este repositorio es la única fuente de la aplicación: código, interfaz, herramientas, lanzadores, pruebas, documentación y flujos de publicación. Cada versión sale de una etiqueta `vX.Y.Z` y se distribuye como GitHub Release con paquetes de escritorio para Windows y macOS (doble clic, sin comandos), instrucciones en español (`docs/instalacion.md`), notas de la versión y un caso sintético de demostración. El repositorio es privado: para descargar una versión hace falta acceso de lectura. El proceso completo está en `docs/lanzamientos.md`; la primera prueba de Miguel en Windows 10 es la prueba de aceptación de un paquete que ya probamos nosotros.
+Este repositorio es la única fuente de la aplicación: código, interfaz, herramientas, lanzadores, pruebas, documentación y flujos de publicación. Cada versión sale de una etiqueta `vX.Y.Z` y se distribuye como GitHub Release con paquetes de escritorio para Windows y macOS (doble clic, sin comandos), instrucciones en español (`docs/instalacion.md`), notas de la versión y un caso sintético de demostración. Los adjuntos llevan siempre el mismo nombre, así los botones de arriba apuntan a la versión más reciente publicada. El proceso completo está en `docs/lanzamientos.md`; cada paquete se prueba a mano en Windows 10 y macOS antes de publicarse.
 
 ## Dónde está cada cosa
 

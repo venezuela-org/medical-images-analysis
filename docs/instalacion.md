@@ -4,7 +4,7 @@ Aplicación local para anonimizar estudios PET/CT, comprobar que la copia es exa
 
 ## Instalar
 
-1. Descarga el paquete de tu sistema desde la versión publicada: `PET-CT-local-vX.Y.Z-windows.zip` o `PET-CT-local-vX.Y.Z-macos.zip`.
+1. Descarga el paquete de tu sistema con los botones del README del repositorio, o desde la versión publicada en Releases: `PET-CT-local-windows.zip` o `PET-CT-local-macos.zip`.
 2. Descomprímelo en una carpeta fuera de OneDrive, iCloud Drive, Dropbox o Google Drive, por ejemplo `C:\PET-CT local` o `~/Aplicaciones/PET-CT local`.
 3. Windows: doble clic en `PET-CT local.exe`. Si SmartScreen avisa, "Más información" y "Ejecutar de todas formas"; el programa no está firmado.
    macOS: doble clic en `Abrir PET-CT local.command`. La primera vez macOS dice que no puede abrirlo porque no puede comprobar al desarrollador: cierra el aviso, ve a Ajustes del Sistema, Privacidad y seguridad, baja hasta el mensaje sobre `Abrir PET-CT local.command` y pulsa "Abrir de todos modos"; vuelve a hacer doble clic. Ese lanzador quita la marca de cuarentena del paquete y arranca la aplicación. Si en vez de eso aparece "Python.framework está dañado", el paquete sigue en cuarentena: abre la Terminal, escribe `xattr -dr com.apple.quarantine ` con un espacio al final, arrastra la carpeta `PET-CT local` a la ventana y pulsa Intro; luego vuelve a hacer doble clic en el lanzador.
