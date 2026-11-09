@@ -234,3 +234,9 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|
 | Botones de descarga en el README | Windows, Mac y datos de demostración, hacia `releases/latest/download/<nombre>` |
 | Adjuntos con nombre fijo | `PET-CT-local-windows.zip`, `PET-CT-local-macos.zip`, `datos-demo-sinteticos.zip`; `instalacion.md` actualizado |
+
+# Cambios 0.7.5 / Changes 0.7.5
+
+| Qué / What | Detalle / Detail |
+|---|---|
+| Acentos, toda la cadena | Salida de las herramientas decodificada como UTF-8 (antes cp1252 en Windows: "polÃ­tica"); selector de carpetas en UTF-8 para rutas con acentos; app.js y app.css con charset; consola de Windows en UTF-8; todas las lecturas y escrituras de texto con encoding explícito |
