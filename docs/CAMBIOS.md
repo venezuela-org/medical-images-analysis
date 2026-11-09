@@ -227,3 +227,10 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|---|
 | SUV solo en PET | "SUV de esta serie" y "Comparar SUV original / limpio" deshabilitados en series que no son PET, con nota | Prueba en navegador en verde |
 | Insignias de Enviar | La insignia de revisión se busca en la lista actual al llegar la respuesta; si la lista se repintó, se actualiza igual | Prueba en navegador en verde |
+
+# Cambios 0.7.4 / Changes 0.7.4
+
+| Qué / What | Detalle / Detail |
+|---|---|
+| Botones de descarga en el README | Windows, Mac y datos de demostración, hacia `releases/latest/download/<nombre>` |
+| Adjuntos con nombre fijo | `PET-CT-local-windows.zip`, `PET-CT-local-macos.zip`, `datos-demo-sinteticos.zip`; `instalacion.md` actualizado |
