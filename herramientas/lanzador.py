@@ -32,6 +32,13 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 except (AttributeError, ValueError):
     pass
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)   # la consola muestra UTF-8; sin esto los acentos salen como "Ã³"
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
 
 HERRAMIENTAS = ("anonimizar", "emparejar", "cotejar", "suv", "demo")
 AQUI = Path(__file__).resolve().parent

@@ -854,7 +854,7 @@ def cmd_limpiar(args: argparse.Namespace) -> int:
         decir("Hay otra limpieza en curso sobre esta carpeta (archivo .corriendo). Si no es así, bórralo",
               "another run is in progress; delete .corriendo if that is wrong")
         return 2
-    cerrojo.write_text(str(os.getpid()))
+    cerrojo.write_text(str(os.getpid()), encoding="utf-8")
     try:
         return _limpiar(args, entrada, salida)
     finally:

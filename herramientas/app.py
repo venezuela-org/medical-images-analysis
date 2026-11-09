@@ -87,7 +87,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -126,15 +126,17 @@ def dialogo_carpeta() -> str | None:
     try:
         if sys.platform == "darwin":
             r = subprocess.run(["osascript", "-e", 'POSIX path of (choose folder with prompt "Carpeta con los DICOM originales")'],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             return (r.stdout.strip() or None) if r.returncode == 0 else None
         if sys.platform.startswith("win"):
-            ps = ("Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                  "$d.Description = 'Carpeta con los DICOM originales'; if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }")
-            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, timeout=600)
+            # La ruta elegida puede llevar acentos (C:\\Users\\José\\...): PowerShell la escribe en UTF-8 y aquí se lee como UTF-8
+            ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; "
+                  "$d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Carpeta con los DICOM originales'; "
+                  "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }")
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             return r.stdout.strip() or None
         r = subprocess.run(["zenity", "--file-selection", "--directory", "--title=Carpeta con los DICOM originales"],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         return r.stdout.strip() or None
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -146,7 +148,7 @@ def correr_en_segundo_plano(nombre: str, comando: list[str]) -> str:
 
     def hilo() -> None:
         try:
-            p = subprocess.Popen(comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            p = subprocess.Popen(comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1)  # las herramientas escriben UTF-8; sin esto Windows decodifica en cp1252
             assert p.stdout is not None
             for linea in p.stdout:
                 TRABAJOS[tid]["lineas"].append(linea.rstrip())
@@ -167,7 +169,7 @@ def correr_en_segundo_plano(nombre: str, comando: list[str]) -> str:
 
 
 def ejecutar(comando: list[str]) -> tuple[int, str]:
-    r = subprocess.run(comando, capture_output=True, text=True)
+    r = subprocess.run(comando, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, (r.stdout + r.stderr)
 
 
@@ -1100,12 +1102,12 @@ def inicio(request: Request):
 @app.get("/static/app.css")
 def css():
     # código sin datos: público para que el navegador pueda cargarlo; la página y la API exigen el token
-    return PlainTextResponse(CSS, media_type="text/css")
+    return PlainTextResponse(CSS, media_type="text/css; charset=utf-8")
 
 
 @app.get("/static/app.js")
 def js():
-    return PlainTextResponse(JS, media_type="application/javascript")
+    return PlainTextResponse(JS, media_type="text/javascript; charset=utf-8")
 
 
 def main() -> None:
