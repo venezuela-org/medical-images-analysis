@@ -118,3 +118,4 @@ jobs:
             adjuntos/PET-CT-local-*.zip
             adjuntos/datos-demo-sinteticos.zip
             docs/instalacion.md
+            docs/guia-rapida.pdf

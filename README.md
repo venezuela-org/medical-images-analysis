@@ -18,7 +18,7 @@ La aplicación de escritorio, lista para doble clic, sin instalar nada más. Eli
 | Mac (M1 a M4) | Carpeta `PET-CT local` con `Abrir PET-CT local.command`. Descomprimir fuera de iCloud Drive y doble clic. |
 | Datos de demostración | Un CT y un PET inventados, con identidad ficticia, para practicar sin datos de pacientes. La aplicación también los crea con un botón. |
 
-Instrucciones paso a paso: [`docs/instalacion.md`](docs/instalacion.md) y la guía rápida en PDF adjunta a cada versión. Todas las versiones, con sus notas: [Releases](https://github.com/venezuela-org/medical-images-analysis/releases).
+Instrucciones: la [guía rápida en PDF](docs/guia-rapida.pdf) (seis páginas con capturas, también adjunta a cada versión) y [`docs/instalacion.md`](docs/instalacion.md) en texto. Todas las versiones, con sus notas: [Releases](https://github.com/venezuela-org/medical-images-analysis/releases).
 
 ## Reglas del repositorio
 
@@ -36,7 +36,7 @@ Este repositorio es la única fuente de la aplicación: código, interfaz, herra
 |---|---|
 | `herramientas/` | `lanzador.py` (punto de entrada del paquete), `app.py`, `anonimizar.py`, `emparejar.py`, `cotejar.py`, `suv.py`, `demo.py` (caso sintético), `ventana.py`, `empaquetar.sh` (PyInstaller), lanzadores de doble clic y la validación IBSI-SUV. Su `README.md` es el manual de uso. |
 | `pruebas/` | Pruebas con DICOM sintéticos que recorren la política: se ejecutan en cada cambio sin tocar datos reales. |
-| `docs/` | `CAMBIOS.md` (cada hallazgo, su corrección y su prueba), `diseno.md` (tokens y componentes del lenguaje visual), `instalacion.md`, `lanzamientos.md`, `notas-de-version/`, `capturas/` (pantallas con datos sintéticos). |
+| `docs/` | `CAMBIOS.md` (cada hallazgo, su corrección y su prueba), `diseno.md` (tokens y componentes del lenguaje visual), `instalacion.md`, `lanzamientos.md`, `historial.md` (comprobaciones del historial antes de publicar), `notas-de-version/`, `capturas/` (pantallas con datos sintéticos). |
 | `.github/` | `comprobaciones.yml` (pruebas en cada cambio, Linux y Windows), `interfaz.yml` (prueba en navegador y capturas) y `publicar.yml` (paquetes, prueba de humo por la API, comprobación de adjuntos y borrador de Release al etiquetar). |
 
 ## Cómo trabajamos
