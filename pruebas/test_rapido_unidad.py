@@ -313,7 +313,7 @@ def test_si_no_se_puede_confirmar_el_registro_tras_publicar_es_un_aviso(app, tmp
     real = app.os.replace
 
     def sin_renombrar_registros(a, b):
-        if Path(b).name.startswith("revision_rapido_"):
+        if Path(b).name.startswith("revision_rapido_") and Path(b).name.endswith(".json"):   # el renombrado que confirma, no la escritura previa
             raise OSError("sin permiso")
         return real(a, b)
 

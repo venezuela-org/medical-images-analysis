@@ -35,8 +35,24 @@ Retirar no borra nada:
 | Estado en la aplicación | La revisión deja de valer: el paciente vuelve a pendiente en Estudios y en Enviar |
 | Zips ya exportados | No cambian. No se pueden cambiar |
 
-Lo último es lo importante. Un zip que ya se creó con esa revisión sigue diciendo en su manifiesto que estaba revisado, esté donde esté. La retirada los enumera, con su carpeta, si siguen allí y si siguen siendo el mismo archivo, para que no se compartan; no puede hacer más que eso.
+Lo último es lo importante. Un zip que ya se creó con esa revisión sigue diciendo en su manifiesto que estaba revisado, esté donde esté. La retirada los enumera, con su carpeta, si siguen allí y si siguen siendo el mismo archivo, para que no se compartan; no puede hacer más que eso. Enumera los que dependían exactamente de la revisión retirada: el zip de una corrida, para la revisión de esa corrida; y los paquetes de la pestaña Enviar cuyo manifiesto cita esa revisión del paciente, por su fecha. Un paquete revisado con otra revisión del mismo paciente no entra en la lista.
 
-Si la revisión de un paciente la escribió una corrida del modo rápido, retirar una retira la otra. Una revisión nueva después de una retirada no borra el historial: la primera revisión y su retirada siguen guardadas.
+La declaración de una corrida del modo rápido es un solo acto. Por eso retirar la revisión de la corrida retira también las revisiones de paciente que esa corrida escribió, y retirar una de esas revisiones de paciente retira la corrida y las demás. Una revisión nueva después de una retirada no borra el historial: la primera revisión y su retirada siguen guardadas.
 
 Ningún registro de revisión se sobrescribe sin dejar antes una copia en el historial, tampoco al registrar una revisión nueva sobre otra anterior.
+
+### Una retirada vale desde que se registra
+
+Cada retirada es un diario, `limpios_REPORTES/retiradas/retirada_<fecha>_<id>.json`. Escribirlo es el punto de compromiso:
+
+1. El diario dice quién retira, cuándo y por qué; qué registros alcanza, con el sha256 de cada uno y el motivo por el que entra; qué paquetes dependían de ellos; y qué queda por hacer en cada registro.
+2. Desde que el diario existe, las revisiones que alcanza dejan de autorizar que se comparta nada. La aplicación consulta los diarios antes de mirar el registro de un paciente, de modo que da igual que la actualización de ese registro haya fallado.
+3. Después se actualiza cada registro: se anota la retirada junto al registro de la corrida, se guarda en el historial el original de cada paciente y se sustituye su registro por la retirada. Cada paso se anota en el diario.
+
+Si el diario no se puede escribir, no se ha retirado nada, y así se dice.
+
+Si falla alguno de los pasos posteriores, la retirada queda registrada e incompleta. La respuesta enumera lo hecho y lo pendiente, y la pestaña Registro lo muestra con el botón "Terminar las retiradas pendientes". Volver a intentarlo, o arrancar de nuevo la aplicación, termina lo que falta. Terminarla no cambia quién la retiró, cuándo ni por qué: esos datos son los del primer intento, y cada reintento se anota aparte. Repetir un paso ya hecho no hace nada, y no se crean copias de más en el historial.
+
+Si, con una retirada a medias, alguien registra una revisión nueva de ese paciente, es otro registro: la retirada no lo alcanza, y al terminarla no se toca.
+
+Los registros se escriben de forma atómica: en disco queda el anterior entero o el nuevo entero.

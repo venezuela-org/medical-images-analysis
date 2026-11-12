@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -678,8 +678,23 @@ def verificar(request: Request, cuerpo: dict):
 
 
 def _escribir_json(ruta: Path, datos: dict) -> None:
-    """Escritura de un registro JSON en disco; un único punto para todas las evidencias (manifiestos y revisiones)."""
-    ruta.write_text(json.dumps(datos, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Escritura de un registro JSON en disco; un único punto para todas las evidencias (manifiestos, revisiones y
+    retiradas). Es atómica: se escribe un temporal en la misma carpeta y se renombra, así que en disco queda el registro
+    anterior entero o el nuevo entero, nunca medio."""
+    ruta = Path(ruta)
+    temporal = ruta.with_name(f".{ruta.name}.{secrets.token_hex(3)}.tmp")
+    try:
+        with open(temporal, "w", encoding="utf-8") as f:
+            f.write(json.dumps(datos, ensure_ascii=False, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporal, ruta)
+    except BaseException:
+        try:
+            temporal.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _eliminar(ruta: Path) -> bool:
@@ -1721,9 +1736,19 @@ def leer_revision(pac: str) -> dict:
     if not ruta.exists():
         return {"estado": "pendiente", "vigente": False, "lista_para_compartir": False, "detalle": "sin revisión registrada"}
     try:
-        r = json.loads(ruta.read_text(encoding="utf-8"))
+        datos = ruta.read_bytes()
+        r = json.loads(datos.decode("utf-8"))
     except (OSError, ValueError):
         return {"estado": "pendiente", "vigente": False, "lista_para_compartir": False, "detalle": "registro ilegible"}
+    # Una retirada comprometida manda sobre el registro, aunque el registro todavía no se haya actualizado: en cuanto la
+    # retirada existe, esa revisión deja de autorizar que se comparta nada.
+    diario = retirada_que_cubre("paciente", pac, hashlib.sha256(datos).hexdigest())
+    if diario is not None and r.get("estado") != "retirada":
+        ret = diario["retirada"]
+        return {"paciente": pac, "estado": "retirada", "vigente": False, "lista_para_compartir": False,
+                "detalle": f"revisión retirada el {ret['fecha']} por {ret['quien']}: {ret['motivo']} (su registro está pendiente de actualizar)",
+                "retirada": ret, "retirada_id": diario["id"], "registro_pendiente_de_actualizar": True,
+                "paquetes_afectados": diario.get("paquetes_afectados", [])}
     return evaluar_registro_revision(r, hashes_paciente(pac))
 
 
@@ -1736,6 +1761,9 @@ def archivar_registro(ruta: Path) -> dict | None:
     huella = hashlib.sha256(datos).hexdigest()
     historial = carpeta_reportes() / "historial_revisiones"
     historial.mkdir(parents=True, exist_ok=True)
+    for ya in sorted(historial.glob(f"{ruta.stem}_*_{huella[:8]}.json")):      # repetir el archivado no duplica la copia
+        if hashlib.sha256(ya.read_bytes()).hexdigest() == huella:
+            return {"archivo": f"historial_revisiones/{ya.name}", "sha256": huella}
     copia = historial / f"{ruta.stem}_{dt.datetime.now():%Y%m%d_%H%M%S}_{huella[:8]}.json"
     copia.write_bytes(datos)
     if hashlib.sha256(copia.read_bytes()).hexdigest() != huella:
@@ -1780,10 +1808,83 @@ REGISTRO_RAPIDO_RE = re.compile(r"^revision_rapido_\d{8}_\d{6}_[0-9a-f]{4}\.json
 NOTA_RETIRADA = ("Retirar una revisión invalida su estado en la aplicación. No modifica ni elimina los zips ya exportados: "
                  "los paquetes enumerados aquí se crearon con esa revisión y ya no deben compartirse.")
 
+# Una retirada es un diario: limpios_REPORTES/retiradas/retirada_<fecha>_<id>.json. Escribirlo es el punto de compromiso.
+#   - Dice quién, cuándo y por qué; qué registros alcanza (con su sha256) y por qué cada uno; qué paquetes dependían de
+#     ellos; y qué acciones quedan por hacer sobre cada registro.
+#   - Desde que existe, las revisiones que alcanza dejan de autorizar que se comparta: leer_revision() lo consulta antes de
+#     mirar el registro, así que da igual que actualizar ese registro haya fallado.
+#   - Las acciones (anotar la corrida, archivar el original del paciente, sustituir su registro) son idempotentes y se
+#     marcan en el diario una a una. Si alguna falla, la retirada queda comprometida e incompleta, se informa de lo hecho
+#     y de lo pendiente, y un reintento —o el siguiente arranque— termina lo que falta sin tocar quién la retiró ni cuándo.
 
-def paquetes_revisados_de(pacientes: set[str], zip_de_corrida: dict | None = None) -> list[dict]:
-    """Paquetes revisados, según sus manifiestos locales, que contienen a alguno de estos pacientes; más el zip de la
-    corrida indicada. De cada uno: nombre, destino, si sigue existiendo allí y si sigue siendo el mismo archivo."""
+
+class RetiradaIncompleta(Exception):
+    """La retirada está comprometida, pero no todas sus acciones se completaron."""
+
+    def __init__(self, diario: dict, completadas: list[str], pendientes: list[str], error: str):
+        super().__init__(error)
+        self.diario, self.completadas, self.pendientes, self.error = diario, completadas, pendientes, error
+
+    def cuerpo(self) -> dict:
+        ret = self.diario["retirada"]
+        return {"detail": ("La retirada quedó registrada y esas revisiones ya no autorizan compartir nada, pero no se completaron todas las "
+                           f"actualizaciones ({self.error}). Hecho: {'; '.join(self.completadas) or 'nada'}. Pendiente: {'; '.join(self.pendientes)}. "
+                           "Vuelve a intentarlo para terminarla."),
+                "retirada": self.diario["id"], "comprometida": True, "estado": "incompleta", "quien": ret["quien"], "fecha": ret["fecha"],
+                "motivo": ret["motivo"], "completadas": self.completadas, "pendientes": self.pendientes, "error": self.error,
+                "retiradas": [{"tipo": a["tipo"], "id": a["id"]} for a in self.diario["alcance"]],
+                "paquetes_afectados": self.diario.get("paquetes_afectados", []), "nota": NOTA_RETIRADA}
+
+
+def carpeta_retiradas() -> Path:
+    return carpeta_reportes() / "retiradas"
+
+
+def diarios_de_retirada() -> list[dict]:
+    carpeta = carpeta_retiradas()
+    out = []
+    for ruta in sorted(carpeta.glob("retirada_*.json")) if carpeta.is_dir() else []:
+        try:
+            d = json.loads(ruta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and d.get("id") and isinstance(d.get("alcance"), list) and isinstance(d.get("retirada"), dict):
+            out.append(d)
+    return out
+
+
+def retirada_que_cubre(tipo: str, identificador: str, huella: str | None) -> dict | None:
+    """El diario de retirada que alcanza exactamente ese registro (mismo tipo, mismo identificador, mismo contenido)."""
+    for d in diarios_de_retirada():
+        for a in d["alcance"]:
+            if a.get("tipo") == tipo and a.get("id") == identificador and a.get("sha256") == huella:
+                return d
+    return None
+
+
+def _ruta_diario(d: dict) -> Path:
+    return carpeta_retiradas() / f"retirada_{d['id']}.json"
+
+
+def _retirada_de_corrida(nombre: str) -> Path:
+    return carpeta_reportes() / (nombre[:-5] + ".retirada.json")
+
+
+def _sha_de(ruta: Path) -> str | None:
+    try:
+        return hashlib.sha256(ruta.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
+    """Los paquetes revisados cuya revisión es, exactamente, una de las que se retiran. Para una corrida, su propio zip.
+    Para la revisión de un paciente, los paquetes de la pestaña Enviar que la citan: mismo paciente y misma fecha de
+    revisión en su manifiesto. Un paquete revisado con otra revisión del mismo paciente no entra. De cada uno: nombre,
+    destino, si sigue existiendo allí y si sigue siendo el mismo archivo."""
+    corridas = [a for a in alcance if a["tipo"] == "corrida"]
+    pacientes = {a["id"]: a for a in alcance if a["tipo"] == "paciente"}
+    zips_de_corrida = {(a.get("zip") or {}).get("nombre"): a for a in corridas if (a.get("zip") or {}).get("nombre")}
     encontrados: dict[str, dict] = {}
     carpeta = TRABAJO / "paquetes"
     for manifiesto in sorted(carpeta.glob("paquete_*.manifiesto.json")) if carpeta.is_dir() else []:
@@ -1791,17 +1892,24 @@ def paquetes_revisados_de(pacientes: set[str], zip_de_corrida: dict | None = Non
             m = json.loads(manifiesto.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        en_paquete = set(m.get("pacientes", [])) & pacientes
-        revisados = en_paquete - set(m.get("revision_pixeles_pendiente", []))
-        if not revisados:
-            continue
         z = m.get("zip") or {}
         nombre = z.get("nombre") or manifiesto.name.replace(".manifiesto.json", ".zip")
+        bloque = m.get("revision_pixeles") or {}
+        if "alcance" in bloque:                                       # paquete de una corrida: depende de la revisión de esa corrida
+            if nombre not in zips_de_corrida or bloque.get("estado") != "sin_hallazgos":
+                continue
+            afectados = sorted(m.get("pacientes", []))
+        else:                                                         # paquete de Enviar: depende de la revisión de cada paciente
+            afectados = sorted(pac for pac, a in pacientes.items()
+                               if pac in m.get("pacientes", []) and pac not in m.get("revision_pixeles_pendiente", [])
+                               and (bloque.get(pac) or {}).get("fecha") == a.get("fecha_revision"))
+            if not afectados:
+                continue
         encontrados[nombre] = {"zip": nombre, "destino": z.get("destino") or str(carpeta), "sha256": z.get("sha256"),
-                               "creado": m.get("creado"), "pacientes": sorted(revisados)}
-    if zip_de_corrida and zip_de_corrida.get("nombre"):
-        encontrados.setdefault(zip_de_corrida["nombre"], {"zip": zip_de_corrida["nombre"], "destino": zip_de_corrida.get("destino"),
-                                                          "sha256": zip_de_corrida.get("sha256"), "creado": None, "pacientes": sorted(pacientes)})
+                               "creado": m.get("creado"), "pacientes": afectados}
+    for nombre, a in zips_de_corrida.items():                         # el zip de la corrida, aunque su manifiesto local ya no esté
+        encontrados.setdefault(nombre, {"zip": nombre, "destino": a["zip"].get("destino"), "sha256": a["zip"].get("sha256"),
+                                        "creado": None, "pacientes": sorted(a.get("pacientes", []))})
     out = []
     for e in encontrados.values():
         ruta = Path(e["destino"] or "") / e["zip"]
@@ -1814,106 +1922,233 @@ def paquetes_revisados_de(pacientes: set[str], zip_de_corrida: dict | None = Non
     return sorted(out, key=lambda e: e["zip"])
 
 
-def _retirada_de_corrida(nombre: str) -> Path:
-    return carpeta_reportes() / (nombre[:-5] + ".retirada.json")
-
-
-def _retirar_registro_de_paciente(pac: str, quien: str, motivo: str, fecha: str) -> dict | None:
-    """Sustituye el registro vigente del paciente por una retirada; el original queda intacto en el historial."""
+def _elemento_paciente(pac: str, incluida_por: str) -> dict | None:
+    """El registro vigente de un paciente como elemento del alcance, o None si no hay una revisión que retirar."""
     ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
     try:
-        original = json.loads(ruta.read_text(encoding="utf-8"))
+        datos = ruta.read_bytes()
+        r = json.loads(datos.decode("utf-8"))
     except (OSError, ValueError):
         return None
-    if original.get("estado") not in ("sin_hallazgos", "con_hallazgos"):
+    huella = hashlib.sha256(datos).hexdigest()
+    if r.get("estado") not in ("sin_hallazgos", "con_hallazgos") or retirada_que_cubre("paciente", pac, huella):
         return None
-    referencia = archivar_registro(ruta)
-    paquetes = paquetes_revisados_de({pac})
-    retirada = {"paciente": pac, "estado": "retirada", "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo},
-                "sustituye_a": {**referencia, "estado": original.get("estado"), "revisor": original.get("revisor"), "fecha": original.get("fecha"),
-                                "archivos": len(original.get("archivos", {})), "origen": original.get("origen")},
-                "paquetes_afectados": paquetes, "nota": NOTA_RETIRADA, "app": VERSION}
-    _escribir_json(ruta, retirada)
-    registrar(f"revisión de píxeles: {pac} → retirada por {quien}; {len(paquetes)} paquete(s) revisado(s) afectados")
-    return retirada
+    return {"tipo": "paciente", "id": pac, "sha256": huella, "incluida_por": incluida_por, "estado_revision": r.get("estado"),
+            "revisor": r.get("revisor"), "fecha_revision": r.get("fecha"), "archivos": len(r.get("archivos", {})), "origen": r.get("origen")}
 
 
-def _retirar_registro_de_corrida(nombre: str, quien: str, motivo: str, fecha: str) -> dict | None:
-    """Escribe la retirada junto al registro de la corrida, que no se toca."""
+def _elemento_corrida(nombre: str, incluida_por: str) -> dict | None:
     ruta = carpeta_reportes() / nombre
-    destino = _retirada_de_corrida(nombre)
-    if not ruta.is_file() or destino.exists():
-        return None
-    datos = ruta.read_bytes()
     try:
-        original = json.loads(datos.decode("utf-8"))
-    except ValueError:
+        datos = ruta.read_bytes()
+        r = json.loads(datos.decode("utf-8"))
+    except (OSError, ValueError):
         return None
-    paquetes = paquetes_revisados_de(set(original.get("pacientes", [])), original.get("zip"))
-    paquetes = [e for e in paquetes if e["zip"] == (original.get("zip") or {}).get("nombre")] or paquetes
-    retirada = {"tipo": "retirada de la revisión de una corrida", "registro": nombre, "sha256_registro": hashlib.sha256(datos).hexdigest(),
-                "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo}, "pacientes": original.get("pacientes", []),
-                "archivos": len(original.get("archivos", {})), "revisor": original.get("revisor"), "fecha_revision": original.get("fecha"),
-                "paquetes_afectados": paquetes, "nota": NOTA_RETIRADA, "app": VERSION}
-    _escribir_json(destino, retirada)
-    for t in TRABAJOS.values():                                    # la corrida abierta en pantalla, si es esta
-        if t.get("nombre") == "rapido" and Path(str(t.get("registro_revision", ""))).name == nombre:
-            t["revision_retirada"] = retirada["retirada"]
-    registrar(f"revisión de la corrida {nombre} → retirada por {quien}; {len(paquetes)} paquete(s) afectado(s)")
-    return retirada
+    huella = hashlib.sha256(datos).hexdigest()
+    if retirada_que_cubre("corrida", nombre, huella):
+        return None
+    return {"tipo": "corrida", "id": nombre, "sha256": huella, "incluida_por": incluida_por, "estado_revision": r.get("estado"),
+            "revisor": r.get("revisor"), "fecha_revision": r.get("fecha"), "archivos": len(r.get("archivos", {})),
+            "pacientes": r.get("pacientes", []), "zip": r.get("zip")}
+
+
+def alcance_de_retirada(tipo: str, identificador: str) -> list[dict]:
+    """Todo lo que cae con una retirada. La declaración de una corrida es un solo acto: retirar la corrida retira las
+    revisiones de paciente que escribió, y retirar una de esas revisiones retira la corrida y las demás que escribió."""
+    alcance: dict[tuple, dict] = {}
+
+    def con_corrida(nombre: str, motivo: str) -> None:
+        c = _elemento_corrida(nombre, motivo)
+        if c is None:
+            return
+        alcance[("corrida", nombre)] = c
+        for pac in c["pacientes"]:
+            if ("paciente", pac) in alcance or not PACIENTE_RE.match(str(pac)):
+                continue
+            e = _elemento_paciente(pac, f"la escribió la corrida {nombre}")
+            if e and (e.get("origen") or {}).get("corrida") == nombre:
+                alcance[("paciente", pac)] = e
+
+    if tipo == "paciente":
+        e = _elemento_paciente(identificador, "solicitada")
+        if e is None:
+            return []
+        alcance[("paciente", identificador)] = e
+        corrida = (e.get("origen") or {}).get("corrida") or ""
+        if REGISTRO_RAPIDO_RE.match(corrida):
+            con_corrida(corrida, f"de ella salió la revisión de {identificador}")
+    else:
+        con_corrida(identificador, "solicitada")
+    return list(alcance.values())
+
+
+def _acciones_de(alcance: list[dict]) -> list[dict]:
+    acciones = []
+    for a in alcance:
+        if a["tipo"] == "corrida":
+            acciones.append({"accion": "anotar_corrida", "id": a["id"], "estado": "pendiente",
+                             "descripcion": f"anotar la retirada junto al registro de la corrida {a['id']}"})
+        else:
+            acciones.append({"accion": "archivar_original", "id": a["id"], "estado": "pendiente",
+                             "descripcion": f"guardar en el historial el registro original de {a['id']}"})
+            acciones.append({"accion": "sustituir_registro", "id": a["id"], "estado": "pendiente",
+                             "descripcion": f"sustituir el registro de {a['id']} por la retirada"})
+    return acciones
+
+
+def _hacer_accion(d: dict, accion: dict) -> None:
+    """Ejecuta una acción de la retirada. Repetirla no hace daño: si ya está hecha, no hace nada."""
+    elemento = next(a for a in d["alcance"] if a["id"] == accion["id"] and a["tipo"] == ("corrida" if accion["accion"] == "anotar_corrida" else "paciente"))
+    if accion["accion"] == "anotar_corrida":
+        destino = _retirada_de_corrida(elemento["id"])
+        if not destino.exists():
+            _escribir_json(destino, {"tipo": "retirada de la revisión de una corrida", "retirada_id": d["id"], "registro": elemento["id"],
+                                     "sha256_registro": elemento["sha256"], "retirada": d["retirada"], "incluida_por": elemento["incluida_por"],
+                                     "pacientes": elemento.get("pacientes", []), "archivos": elemento.get("archivos"), "revisor": elemento.get("revisor"),
+                                     "fecha_revision": elemento.get("fecha_revision"), "paquetes_afectados": d.get("paquetes_afectados", []),
+                                     "nota": NOTA_RETIRADA, "app": VERSION})
+        return
+    pac = elemento["id"]
+    ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
+    actual = _sha_de(ruta)
+    if actual != elemento["sha256"]:
+        # ya no es el registro original: o esta misma retirada ya lo sustituyó, o hay un registro posterior que no se toca
+        try:
+            ya = json.loads(ruta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            ya = {}
+        accion["nota"] = "ya sustituido por esta retirada" if ya.get("retirada_id") == d["id"] else "el paciente tiene un registro posterior; no se toca"
+        return
+    referencia = archivar_registro(ruta)                              # idempotente: no duplica la copia
+    if accion["accion"] == "archivar_original":
+        accion["referencia"] = referencia
+        return
+    _escribir_json(ruta, {"paciente": pac, "estado": "retirada", "retirada": d["retirada"], "retirada_id": d["id"],
+                          "incluida_por": elemento["incluida_por"],
+                          "sustituye_a": {**referencia, "estado": elemento.get("estado_revision"), "revisor": elemento.get("revisor"),
+                                          "fecha": elemento.get("fecha_revision"), "archivos": elemento.get("archivos"), "origen": elemento.get("origen")},
+                          "paquetes_afectados": d.get("paquetes_afectados", []), "nota": NOTA_RETIRADA, "app": VERSION})
+
+
+def completar_retirada(d: dict) -> dict:
+    """Hace las acciones pendientes de una retirada comprometida, en orden, anotando cada una en el diario. Si alguna
+    falla, lanza RetiradaIncompleta con lo hecho y lo pendiente; la retirada sigue comprometida."""
+    error = None
+    for accion in d["acciones"]:
+        if accion["estado"] == "hecha":
+            continue
+        try:
+            _hacer_accion(d, accion)
+            accion["estado"] = "hecha"
+            d["estado"] = "completa" if all(a["estado"] == "hecha" for a in d["acciones"]) else "comprometida; acciones pendientes"
+            _escribir_json(_ruta_diario(d), d)
+        except Exception as e:                                        # cualquier fallo de escritura o de archivado
+            error = f"{type(e).__name__} al {accion['descripcion']}"
+            if accion["estado"] == "hecha":                           # la acción se hizo; lo que falló fue anotarla en el diario
+                accion["estado"] = "pendiente"
+                error = f"{type(e).__name__} al anotar en el diario: {accion['descripcion']}"
+            break
+    completadas = [a["descripcion"] for a in d["acciones"] if a["estado"] == "hecha"]
+    pendientes = [a["descripcion"] for a in d["acciones"] if a["estado"] != "hecha"]
+    if pendientes:
+        d["estado"] = "comprometida; acciones pendientes"
+        registrar(f"retirada {d['id']}: incompleta; pendiente: {'; '.join(pendientes)}")
+        raise RetiradaIncompleta(d, completadas, pendientes, error or "acciones pendientes")
+    registrar(f"retirada {d['id']}: completa ({len(d['alcance'])} registro(s), {len(d.get('paquetes_afectados', []))} paquete(s) afectado(s))")
+    ret = d["retirada"]
+    return {"retirada": d["id"], "estado": "completa", "comprometida": True, "quien": ret["quien"], "fecha": ret["fecha"], "motivo": ret["motivo"],
+            "retiradas": [{"tipo": a["tipo"], "id": a["id"]} for a in d["alcance"]], "completadas": completadas, "pendientes": [],
+            "paquetes_afectados": d.get("paquetes_afectados", []), "nota": NOTA_RETIRADA}
+
+
+def _diario_de(tipo: str, identificador: str) -> dict | None:
+    """El diario que ya alcanza a ese paciente o corrida en su estado actual: por el contenido de su registro o, si el
+    registro ya es una retirada, por el identificador que lleva dentro."""
+    if tipo == "paciente":
+        ruta = carpeta_reportes() / f"revision_pixeles_{identificador}.json"
+        d = retirada_que_cubre("paciente", identificador, _sha_de(ruta))
+        if d is None:
+            try:
+                rid = json.loads(ruta.read_text(encoding="utf-8")).get("retirada_id")
+            except (OSError, ValueError):
+                rid = None
+            d = next((x for x in diarios_de_retirada() if x["id"] == rid), None) if rid else None
+        return d
+    return retirada_que_cubre("corrida", identificador, _sha_de(carpeta_reportes() / identificador))
 
 
 def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> dict:
-    """Retira la revisión de un paciente o la de una corrida. Lo que cuelga de ella se retira a la vez: la revisión de
-    paciente que escribió una corrida, y la de la corrida de la que salió una revisión de paciente."""
+    """Retira la revisión de un paciente o la de una corrida, con todo lo que depende de ella. Si ya hay una retirada
+    comprometida e incompleta que la alcanza, la termina, sin cambiar quién la retiró, cuándo ni por qué."""
     quien, motivo = quien.strip()[:120], motivo.strip()[:1000]
-    if not quien:
-        raise HTTPException(400, "indica quién retira la revisión")
-    if len(motivo) < 3:
-        raise HTTPException(400, "indica por qué se retira la revisión")
+    if tipo not in ("paciente", "corrida"):
+        raise HTTPException(400, "tipo debe ser paciente o corrida")
+    if tipo == "paciente":
+        carpeta_paciente(identificador)
+    elif not REGISTRO_RAPIDO_RE.match(identificador):
+        raise HTTPException(400, "identificador de corrida no válido")
     if not CANDADO.acquire(blocking=False):
         raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de retirar una revisión")
     try:
+        existente = _diario_de(tipo, identificador)
+        if existente is not None:
+            if all(a["estado"] == "hecha" for a in existente["acciones"]):
+                raise HTTPException(409, "esa revisión ya está retirada")
+            # reintento: se termina la misma retirada. Quién la retiró, cuándo y por qué no cambian; el reintento se anota.
+            existente.setdefault("reintentos", []).append({"quien": quien or None, "fecha": dt.datetime.now().isoformat(timespec="seconds")})
+            return {**completar_retirada(existente), "reanudada": True}
+        if not quien:
+            raise HTTPException(400, "indica quién retira la revisión")
+        if len(motivo) < 3:
+            raise HTTPException(400, "indica por qué se retira la revisión")
+        alcance = alcance_de_retirada(tipo, identificador)
+        if not alcance:
+            raise HTTPException(409, "no hay una revisión registrada que retirar" if tipo == "paciente"
+                                else "esa corrida no tiene una revisión registrada que retirar")
         fecha = dt.datetime.now().isoformat(timespec="seconds")
-        retiradas = []
-        if tipo == "paciente":
-            carpeta_paciente(identificador)
-            r = _retirar_registro_de_paciente(identificador, quien, motivo, fecha)
-            if r is None:
-                raise HTTPException(409, "ese paciente no tiene una revisión registrada que retirar")
-            retiradas.append({**r, "tipo": "paciente", "id": identificador})
-            corrida = ((r["sustituye_a"].get("origen") or {}).get("corrida") or "")
-            if REGISTRO_RAPIDO_RE.match(corrida):
-                rc = _retirar_registro_de_corrida(corrida, quien, f"se retiró la revisión de {identificador}: {motivo}", fecha)
-                if rc:
-                    retiradas.append({**rc, "tipo": "corrida", "id": corrida})
-        elif tipo == "corrida":
-            if not REGISTRO_RAPIDO_RE.match(identificador):
-                raise HTTPException(400, "identificador de corrida no válido")
-            rc = _retirar_registro_de_corrida(identificador, quien, motivo, fecha)
-            if rc is None:
-                raise HTTPException(409, "esa corrida no tiene una revisión registrada que retirar, o ya está retirada")
-            retiradas.append({**rc, "tipo": "corrida", "id": identificador})
-            for pac in rc["pacientes"]:                              # las revisiones de paciente que escribió esta corrida
-                try:
-                    actual = json.loads((carpeta_reportes() / f"revision_pixeles_{pac}.json").read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if (actual.get("origen") or {}).get("corrida") == identificador:
-                    rp = _retirar_registro_de_paciente(pac, quien, f"se retiró la revisión de la corrida {identificador}: {motivo}", fecha)
-                    if rp:
-                        retiradas.append({**rp, "tipo": "paciente", "id": pac})
-        else:
-            raise HTTPException(400, "tipo debe ser paciente o corrida")
-        paquetes = {e["zip"]: e for r in retiradas for e in r["paquetes_afectados"]}
-        return {"retiradas": [{"tipo": r["tipo"], "id": r["id"]} for r in retiradas], "quien": quien, "fecha": fecha, "motivo": motivo,
-                "paquetes_afectados": sorted(paquetes.values(), key=lambda e: e["zip"]), "nota": NOTA_RETIRADA}
+        diario = {"id": f"{dt.datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(3)}", "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo},
+                  "solicitada": {"tipo": tipo, "id": identificador}, "alcance": alcance,
+                  "paquetes_afectados": paquetes_que_dependen_de(alcance), "acciones": _acciones_de(alcance),
+                  "estado": "comprometida; acciones pendientes", "reintentos": [], "nota": NOTA_RETIRADA, "app": VERSION}
+        # ---- punto de compromiso: si el diario no se puede escribir, no se ha retirado nada ----
+        try:
+            carpeta_retiradas().mkdir(parents=True, exist_ok=True)
+            _escribir_json(_ruta_diario(diario), diario)
+        except Exception as e:
+            registrar(f"retirada: no se pudo registrar ({type(e).__name__}); no se retiró nada")
+            raise HTTPException(500, f"no se pudo registrar la retirada ({type(e).__name__}); no se ha retirado nada")
+        registrar(f"retirada {diario['id']}: comprometida por {quien}; alcanza {', '.join(a['tipo'] + ' ' + a['id'] for a in alcance)}")
+        for t in TRABAJOS.values():                                   # la corrida abierta en pantalla, si es una de estas
+            if t.get("nombre") == "rapido" and Path(str(t.get("registro_revision", ""))).name in {a["id"] for a in alcance if a["tipo"] == "corrida"}:
+                t["revision_retirada"] = diario["retirada"]
+        return {**completar_retirada(diario), "reanudada": False}
     finally:
         CANDADO.release()
 
 
+def retiradas_incompletas() -> list[dict]:
+    return [d for d in diarios_de_retirada() if any(a.get("estado") != "hecha" for a in d.get("acciones", []))]
+
+
+def reanudar_retiradas() -> list[dict]:
+    """Termina, si puede, las retiradas que quedaron a medias. Se llama al arrancar y desde la pantalla de Registro. No
+    cambia nada de lo que ya vale: una retirada comprometida invalida sus revisiones esté o no terminada."""
+    resultados = []
+    for d in retiradas_incompletas():
+        if not CANDADO.acquire(blocking=False):
+            break
+        try:
+            resultados.append(completar_retirada(d))
+        except RetiradaIncompleta as e:
+            resultados.append(e.cuerpo())
+        finally:
+            CANDADO.release()
+    return resultados
+
+
 def revisiones_registradas() -> dict:
-    """Lo que hay registrado: la revisión de cada paciente y la de cada corrida, con su estado y los paquetes afectados."""
+    """Lo que hay registrado: la revisión de cada paciente y la de cada corrida, con su estado, los paquetes afectados y
+    las retiradas que quedaron a medias."""
     carpeta = carpeta_reportes()
     pacientes, corridas = [], []
     for ruta in sorted(carpeta.glob("revision_pixeles_*.json")) if carpeta.is_dir() else []:
@@ -1924,27 +2159,27 @@ def revisiones_registradas() -> dict:
         pacientes.append({"paciente": pac, "estado": r.get("estado"), "vigente": r.get("vigente"), "detalle": r.get("detalle"),
                           "revisor": r.get("revisor"), "fecha": r.get("fecha"), "archivos": r.get("archivos_revisados"),
                           "origen": r.get("origen"), "retirada": r.get("retirada"), "paquetes_afectados": r.get("paquetes_afectados", []),
-                          "se_puede_retirar": r.get("estado") in ("sin_hallazgos", "con_hallazgos") or r.get("detalle", "").startswith("invalidada")})
+                          "se_puede_retirar": r.get("estado") in ("sin_hallazgos", "con_hallazgos") or str(r.get("detalle", "")).startswith("invalidada")})
     for ruta in sorted(carpeta.glob("revision_rapido_*.json")) if carpeta.is_dir() else []:
         if not REGISTRO_RAPIDO_RE.match(ruta.name):
             continue
         try:
-            r = json.loads(ruta.read_text(encoding="utf-8"))
+            datos = ruta.read_bytes()
+            r = json.loads(datos.decode("utf-8"))
         except (OSError, ValueError):
             continue
-        retirada = None
-        try:
-            retirada = json.loads(_retirada_de_corrida(ruta.name).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
+        diario = retirada_que_cubre("corrida", ruta.name, hashlib.sha256(datos).hexdigest())
         z = r.get("zip") or {}
         zip_ruta = Path(z.get("destino") or "") / (z.get("nombre") or "")
         corridas.append({"registro": ruta.name, "revisor": r.get("revisor"), "fecha": r.get("fecha"), "pacientes": r.get("pacientes", []),
                          "archivos": len(r.get("archivos", {})), "mostrado": r.get("mostrado"),
                          "zip": {"nombre": z.get("nombre"), "destino": z.get("destino"), "existe": zip_ruta.is_file() if z.get("nombre") else False},
-                         "retirada": (retirada or {}).get("retirada"), "paquetes_afectados": (retirada or {}).get("paquetes_afectados", []),
-                         "se_puede_retirar": retirada is None})
-    return {"pacientes": pacientes, "corridas": corridas, "nota": NOTA_RETIRADA}
+                         "retirada": (diario or {}).get("retirada"), "paquetes_afectados": (diario or {}).get("paquetes_afectados", []),
+                         "se_puede_retirar": diario is None})
+    incompletas = [{"retirada": d["id"], "quien": d["retirada"]["quien"], "fecha": d["retirada"]["fecha"], "motivo": d["retirada"]["motivo"],
+                    "solicitada": d.get("solicitada"), "completadas": [a["descripcion"] for a in d["acciones"] if a["estado"] == "hecha"],
+                    "pendientes": [a["descripcion"] for a in d["acciones"] if a["estado"] != "hecha"]} for d in retiradas_incompletas()]
+    return {"pacientes": pacientes, "corridas": corridas, "retiradas_incompletas": incompletas, "nota": NOTA_RETIRADA}
 
 
 @api.get("/revision/{pac}")
@@ -1993,7 +2228,17 @@ def revisiones(request: Request):
 def retirar(request: Request, cuerpo: dict):
     """Retira una revisión registrada, de un paciente o de una corrida, con quién y por qué. No borra ningún registro."""
     auth(request)
-    return retirar_revision(str(cuerpo.get("tipo", "")), str(cuerpo.get("id", "")), str(cuerpo.get("quien", "")), str(cuerpo.get("motivo", "")))
+    try:
+        return retirar_revision(str(cuerpo.get("tipo", "")), str(cuerpo.get("id", "")), str(cuerpo.get("quien", "")), str(cuerpo.get("motivo", "")))
+    except RetiradaIncompleta as e:
+        return JSONResponse(status_code=500, content=e.cuerpo())
+
+
+@api.post("/revisiones/retiradas/reanudar")
+def reanudar(request: Request):
+    """Termina las retiradas que quedaron comprometidas e incompletas."""
+    auth(request)
+    return {"resultados": reanudar_retiradas(), "incompletas": len(retiradas_incompletas())}
 
 
 @api.get("/registro")
@@ -2101,6 +2346,7 @@ HTML = """<!doctype html>
   <h2>Revisiones de píxeles registradas</h2>
   <p class="suave">Una revisión se puede retirar: el registro original se conserva, y una retirada con tu nombre, la fecha y el motivo lo sustituye. Retirar no cambia los zips ya exportados; la lista de paquetes afectados dice cuáles ya no deben compartirse.</p>
   <div id="revisiones-estado"></div>
+  <div id="retiradas-a-medias" class="oculto"><div id="retiradas-a-medias-texto"></div><div class="fila"><button id="btn-reanudar">Terminar las retiradas pendientes</button></div></div>
   <div class="tabla-marco"><table id="tabla-revisiones"><thead><tr><th>Alcance</th><th>Estado</th><th>Quién y cuándo</th><th>Archivos</th><th>Paquete</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="retirar-form" class="oculto">
     <h3 id="retirar-titulo">Retirar revisión</h3>
@@ -2568,6 +2814,9 @@ async function cargarRevisiones() {
     quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
     paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', '), retirable: p.se_puede_retirar});
   mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
+  const medias = r.retiradas_incompletas || [];
+  $('#retiradas-a-medias').classList.toggle('oculto', medias.length === 0);
+  mensaje('#retiradas-a-medias-texto', 'aviso', medias.length ? medias.map(m => 'Retirada de ' + m.fecha + ' por ' + m.quien + ' (' + m.motivo + '): registrada, y sus revisiones ya no valen; falta ' + m.pendientes.join('; ') + '.').join(' ') : '');
   for (const f of filas) {
     const tr = document.createElement('tr');
     celda(tr, f.alcance); const td = document.createElement('td'); td.appendChild(insignia(f.estado[0], f.estado[1])); tr.appendChild(td);
@@ -2578,6 +2827,14 @@ async function cargarRevisiones() {
   }
 }
 $('#btn-retirar-cancelar').onclick = () => { RETIRAR = null; $('#retirar-form').classList.add('oculto'); };
+$('#btn-reanudar').onclick = async () => {
+  $('#btn-reanudar').disabled = true;
+  try {
+    const r = await api('revisiones/retiradas/reanudar', {});
+    mensaje('#retirada-resultado', r.incompletas ? 'aviso' : 'ok', r.incompletas ? 'Siguen quedando ' + r.incompletas + ' retirada(s) por terminar: ' + r.resultados.filter(x => x.pendientes && x.pendientes.length).map(x => x.pendientes.join('; ')).join(' · ') + '.' : 'Retiradas terminadas.');
+  } catch (err) { mensaje('#retirada-resultado', 'error', err.message); }
+  finally { $('#btn-reanudar').disabled = false; await cargarRevisiones(); }
+};
 $('#btn-retirar').onclick = async () => {
   if (!RETIRAR) return;
   const quien = $('#retirar-quien').value.trim(), motivo = $('#retirar-motivo').value.trim();
@@ -2591,7 +2848,7 @@ $('#btn-retirar').onclick = async () => {
       'Retirar no cambia los zips ya exportados.');
     RETIRAR = null; $('#retirar-form').classList.add('oculto'); $('#retirar-motivo').value = ''; await cargarRevisiones();
     ACTUAL = null; $('#visor').classList.add('oculto');
-  } catch (err) { mensaje('#retirada-resultado', 'error', err.message); }
+  } catch (err) { mensaje('#retirada-resultado', 'error', err.message); await cargarRevisiones(); }
   finally { $('#btn-retirar').disabled = false; }
 };
 async function cargarRegistro() { cargarRevisiones(); texto('#texto-registro', (await api('registro')).join('\n')); }
@@ -2657,6 +2914,15 @@ def main() -> None:
     # "conexión rechazada". Con miles de archivos el índice tarda unos segundos.
     print("Preparando el índice de estudios; con muchos archivos tarda unos segundos... (indexing studies)", flush=True)
     indexar()
+    try:
+        a_medias = len(retiradas_incompletas())
+        if a_medias:
+            reanudar_retiradas()
+            quedan = len(retiradas_incompletas())
+            print(f"Retiradas de revisión a medias: {a_medias}; siguen incompletas: {quedan}. Las revisiones que alcanzan ya no valen en ningún caso."
+                  + (" Termínalas en la pestaña Registro." if quedan else ""), flush=True)
+    except Exception as e:
+        registrar(f"retiradas: no se pudieron reanudar al arrancar ({type(e).__name__})")
     print(f"Listo. Abre en el navegador (open in your browser): {url}", flush=True)
     registrar(f"app {VERSION} iniciada en 127.0.0.1:{args.puerto}")
     if not args.sin_navegador:

@@ -322,3 +322,27 @@ def test_retirar_con_otro_trabajo_en_curso_se_rechaza(app, tmp_path):
     finally:
         app.CANDADO.release()
     assert app.leer_revision(pac)["lista_para_compartir"] is True     # nada cambió
+
+
+def test_solo_se_senalan_los_paquetes_que_dependen_de_la_revision_retirada(app, tmp_path):
+    """El mismo paciente tiene una revisión propia, con su paquete de la pestaña Enviar, y después una corrida revisada de
+    otro estudio suyo. Retirar la revisión de la corrida señala el zip de la corrida y ninguno más; la revisión del
+    paciente, que es otra, sigue valiendo."""
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    correr(app, caso(tmp_path, "A", 1), tmp_path, "primera")
+    pac = "ANON-0001"
+    revision_clasica(app, pac, "Ana")
+    clasico = app.crear_paquete([pac])                                # paquete revisado con la revisión de Ana
+    assert clasico["revision_pixeles_pendiente"] == []
+    t2 = correr(app, caso(tmp_path, "B", 2), destino, "segunda")      # otro estudio del mismo paciente
+    assert t2["pacientes"] == [pac]
+    navegador_muestra(app, t2, cuadros(t2))
+    r2 = app.aplicar_revision_rapido(t2, "Miguel")
+    assert r2["revision_de_paciente_actualizada"] == []               # la corrida no cubre al paciente entero: no escribe su revisión
+    ret = app.retirar_revision("corrida", Path(r2["registro_revision"]).name, "Arturo", "solo la corrida")
+    assert [e["zip"] for e in ret["paquetes_afectados"]] == [Path(r2["zip"]).name]
+    assert ret["retiradas"] == [{"tipo": "corrida", "id": Path(r2["registro_revision"]).name}]
+    assert Path(clasico["ruta"]).name not in [e["zip"] for e in ret["paquetes_afectados"]]
+    # la revisión del paciente quedó invalidada por la segunda importación (sus archivos cambiaron), no por la retirada
+    assert app.leer_revision(pac)["estado"] != "retirada"
