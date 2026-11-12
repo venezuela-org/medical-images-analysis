@@ -339,3 +339,37 @@ def test_revision_clasica_por_la_api_exige_mostrar_todos_los_cortes(srv, tmp_pat
     assert estado == 200 and r["lista_para_compartir"] is True and r["mostrado"]["cuadros_mostrados"] == 8
     estado, ret = srv.api("revisiones/retirar", {"tipo": "paciente", "id": pac, "quien": "Arturo", "motivo": "prueba de retirada"})
     assert estado == 200 and ret["retiradas"] == [{"tipo": "paciente", "id": pac}]
+
+
+def test_con_un_diario_de_retirada_ilegible_la_api_rechaza_las_dos_revisiones(srv, tmp_path):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    t = srv.rapido(caso(tmp_path, "A"), destino)
+    pac = t["pacientes"][0]
+    _, series = srv.api("estudios?refrescar=1")
+    for s in series:                                                  # todos los cortes del paciente, mostrados en Estudios
+        for i in range(s["n"]):
+            srv.png(f"serie/{s['id']}/corte/{i}")
+            srv.api(f"serie/{s['id']}/mostrado", {"i": i})
+    carpeta = srv.trabajo / "limpios_REPORTES" / "retiradas"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    roto = carpeta / "retirada_20261112_101010_abcdef.json"
+    roto.write_text('{"id": "20261112_101010_abcdef", "retirada": {"quien": "A', encoding="utf-8")      # un diario a medio escribir
+    _, estado_trabajo = srv.api(f"trabajo/{t['id']}")
+    assert estado_trabajo["retiradas_no_verificables"][0]["diario"] == roto.name
+
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 409 and r["retiradas_no_verificables"] is True and r["diarios_con_problemas"][0]["diario"] == roto.name
+    assert roto.name in r["detail"] and "no es JSON válido" in r["detail"]
+    estado, r = srv.api("revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "Prueba"})
+    assert estado == 409 and r["retiradas_no_verificables"] is True and r["diarios_con_problemas"][0]["diario"] == roto.name
+    assert list(destino.iterdir()) == []                              # nada publicado
+    assert not list((srv.trabajo / "limpios_REPORTES").glob("revision_*"))                              # ninguna revisión registrada
+    estado, lista = srv.api("revisiones")
+    assert lista["retiradas_no_verificables"] is True and lista["diarios_con_problemas"][0]["diario"] == roto.name
+
+    roto.unlink()                                                     # resuelto el diario, las dos funcionan
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 200 and Path(r["zip"]).parent == destino and r["revision_pixeles_pendiente"] == []
+    _, estado_trabajo = srv.api(f"trabajo/{t['id']}")
+    assert estado_trabajo["retiradas_no_verificables"] == []

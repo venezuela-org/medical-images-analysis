@@ -63,6 +63,9 @@ Los registros se escriben de forma atómica: en disco queda el anterior entero o
 
 - Ninguna revisión autoriza que se comparta. Su estado pasa a "no verificable", con el nombre del diario que requiere atención y el motivo. Vale para todos los pacientes, también para los que nada tienen que ver con esa retirada, porque no se puede saber a quién alcanza.
 - Un paquete nuevo marca a esos pacientes como pendientes, y su manifiesto lo dice.
+- No se registra ninguna revisión "sin hallazgos", ni en el modo rápido ni en la pestaña Estudios. La operación se rechaza antes de escribir ninguna evidencia, con el diario que requiere atención y el motivo. Registrar un hallazgo sí se puede: no autoriza nada.
+- Ningún paquete sale como revisado. La regla está en el empaquetador común, así que vale también para el modo rápido, que trae su propia revisión de corrida; y se comprueba al empezar, antes de dejar evidencias y justo antes de publicar. Al destino elegido no llega nada, tampoco un paquete con el estado rebajado.
+- El zip pendiente del modo rápido se sigue creando, en la carpeta de trabajo, y su manifiesto dice en el campo `retiradas` que el estado no se pudo verificar. Todo manifiesto lleva ese campo, con `verificables` en verdadero o falso.
 - La pestaña Registro muestra qué diario requiere atención. No se puede retirar ni terminar ninguna retirada hasta resolverlo.
 - Al arrancar, la aplicación lo avisa en la terminal y sigue funcionando.
 - Ningún registro se toca. Cuando el diario vuelve a poder leerse, todo sigue donde estaba: la retirada comprometida, lo que le faltaba por hacer y las revisiones de los demás.

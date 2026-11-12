@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.7"
+VERSION = "0.9.8"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -599,6 +599,8 @@ def trabajo(request: Request, tid: str):
     out = {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida", "servidos", "mostrados")}
     if t.get("nombre") == "rapido" and t.get("zip"):
         out["progreso"] = progreso_corrida(t)
+        ahora = estado_de_retiradas()                                 # el estado de ahora, no el de cuando terminó la corrida
+        out["retiradas_no_verificables"] = ahora["problemas"] if ahora["bloqueo"] else []
     return out
 
 
@@ -724,6 +726,32 @@ def texto_restos(restos: list[str]) -> str:
             f". Los que terminan en {SUFIJO_PREPARADO} son evidencia preparada de una publicación que no ocurrió, no un registro de revisión.")
 
 
+class RevisionBloqueada(Exception):
+    """No se puede registrar una revisión ni publicar un paquete revisado mientras el estado de las retiradas no se
+    pueda verificar. Lleva los diarios que requieren atención, con su motivo."""
+
+    def __init__(self, problemas: list[dict], accion: str, restos: list[str] | None = None):
+        self.problemas, self.accion, self.restos = list(problemas), accion, list(restos or [])
+        super().__init__(self.mensaje())
+
+    def mensaje(self) -> str:
+        return (f"no se puede {self.accion}: no se puede verificar el estado de las retiradas ("
+                + "; ".join(f"{p['diario']}: {p['motivo']}" for p in self.problemas)
+                + "). Hasta que ese diario se pueda leer no se registra ninguna revisión ni se publica ningún paquete revisado."
+                + texto_restos(self.restos))
+
+    def cuerpo(self) -> dict:
+        return {"detail": self.mensaje(), "diarios_con_problemas": self.problemas, "retiradas_no_verificables": True, "restos": self.restos}
+
+
+class _RetiradasDejaronDeSerVerificables(Exception):
+    """Uso interno del empaquetador: el estado de las retiradas dejó de poder verificarse a mitad del empaquetado."""
+
+    def __init__(self, problemas: list[dict]):
+        super().__init__("retiradas no verificables")
+        self.problemas = problemas
+
+
 class PaqueteRechazado(Exception):
     """El paquete no se creó; lleva el código HTTP y el cuerpo que explican por qué."""
 
@@ -757,6 +785,18 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
     carpetas = {pac: carpeta_paciente(pac) for pac in pacientes}   # valida cada identificador antes de tocar nada
     if not limpieza_en_curso_permitida and (TRABAJO / "limpios" / ".corriendo").exists():
         raise PaqueteRechazado(409, {"detail": "hay una limpieza en curso; espera a que termine / a cleaning run is in progress"})
+
+    # Regla común a todos los que empaquetan: mientras el estado de las retiradas no se pueda verificar, ningún paquete
+    # puede salir como revisado. Vale también para quien trae su propia revisión de corrida (el modo rápido): un paquete
+    # que la declara "sin hallazgos" se rechaza antes de leer un solo archivo. Los paquetes pendientes se pueden crear, y
+    # su manifiesto dice que el estado de las retiradas no se pudo verificar.
+    retiradas = estado_de_retiradas()
+    declara_revision_de_corrida = revision_corrida is not None and revision_corrida.get("estado") == "sin_hallazgos"
+    if retiradas["bloqueo"] and declara_revision_de_corrida:
+        registrar("empaquetar: rechazado un paquete revisado; el estado de las retiradas no se puede verificar: " + texto_de_problemas(retiradas["problemas"]))
+        raise PaqueteRechazado(409, {"detail": "no se puede publicar un paquete revisado: no se puede verificar el estado de las retiradas ("
+                                               + texto_de_problemas(retiradas["problemas"]) + "); nada se empaquetó",
+                                     "diarios_con_problemas": retiradas["problemas"], "retiradas_no_verificables": True})
 
     # 1. cada archivo se lee UNA vez: esos bytes se verifican, se hashean y se escriben al zip
     #    each file is read ONCE: those same bytes are verified, hashed and written to the zip
@@ -846,6 +886,10 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
                   "aviso": aviso_manifiesto,
                   "archivos": [{"ruta": exp, "sha256": h, "bytes": len(datos)} for exp, datos, h, _ in entradas],
                   "nombres": "corte_NNNNNN es un índice de presentación por serie; no modifica InstanceNumber ni ningún otro atributo DICOM",
+                  "retiradas": {"verificables": not retiradas["bloqueo"], "diarios_con_problemas": retiradas["problemas"],
+                                "nota": ("El estado de las retiradas de revisión no se pudo verificar al crear este paquete: ninguna revisión "
+                                         "se da por vigente y el paquete no está revisado." if retiradas["bloqueo"] else
+                                         "El estado de las retiradas de revisión se pudo verificar al crear este paquete.")},
                   "demografia": {"nota": "Por estudio: identificador anónimo, sexo registrado en el DICOM (no se infiere) y edad en la fecha del "
                                          "estudio, calculada antes de anonimizar las fechas. No se exportan la fecha de nacimiento ni la fecha "
                                          "original del estudio. 90 años o más se agrupan, como en PatientAge.",
@@ -882,6 +926,14 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
                     raise RuntimeError(exp)
         huella = sha256_archivo(tmp)
 
+        # Antes de dejar ninguna evidencia: si este paquete va a salir como revisado, el estado de las retiradas tiene que
+        # seguir pudiéndose verificar ahora, no solo cuando empezó el empaquetado.
+        declara_revision = declara_revision_de_corrida or (revision_corrida is None and len(pendientes) < len(pacientes))
+        etapa = "la comprobación del estado de las retiradas"
+        ahora = estado_de_retiradas()
+        if declara_revision and ahora["bloqueo"]:
+            raise _RetiradasDejaronDeSerVerificables(ahora["problemas"])
+
         # 3. evidencias locales ANTES de publicar: manifiesto externo y lo que pida quien llama
         etapa = "el guardado del manifiesto local"
         _escribir_json(manifiesto_preparado, {**manifiesto, "zip": {"nombre": nombre, "destino": str(destino_dir), "sha256": huella},
@@ -890,6 +942,12 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
             etapa = "el guardado del registro previo a la publicación"
             antes_de_publicar({"nombre": nombre, "ruta": str(final), "sha256": huella, "manifiesto_local": str(manifiesto_local),
                                "hashes": {rel: h for _, _, h, rel in entradas}})
+
+        # y otra vez justo antes del punto de compromiso, con las evidencias ya preparadas (si falla, se retiran)
+        etapa = "la comprobación del estado de las retiradas"
+        ahora = estado_de_retiradas()
+        if declara_revision and ahora["bloqueo"]:
+            raise _RetiradasDejaronDeSerVerificables(ahora["problemas"])
 
         # 4. PUBLICACIÓN (punto de compromiso): el zip aparece con su nombre final de una sola vez
         etapa = "la copia al destino"
@@ -906,6 +964,10 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
         # nada se publicó: se retira todo lo intermedio, y lo que no se pueda retirar se devuelve con su ruta
         restos = [str(resto) for resto in (tmp, parcial, manifiesto_preparado) if resto is not None and not _eliminar(resto)]
         registrar(f"empaquetar: falló {etapa} ({type(e).__name__}); nada publicado" + (f"; sin retirar: {', '.join(restos)}" if restos else ""))
+        if isinstance(e, _RetiradasDejaronDeSerVerificables):
+            raise PaqueteRechazado(409, {"detail": "no se puede publicar un paquete revisado: el estado de las retiradas dejó de poder verificarse ("
+                                                   + texto_de_problemas(e.problemas) + "); el zip no se publicó",
+                                         "diarios_con_problemas": e.problemas, "retiradas_no_verificables": True, "restos": restos})
         raise PaqueteRechazado(500, {"detail": f"falló {etapa}; el zip no se publicó / package not published", "restos": restos})
 
     # 5. después de publicar ya no hay errores, solo avisos: la ruta publicada se conserva pase lo que pase
@@ -921,6 +983,7 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
               + (f"; avisos: {len(avisos)}" if avisos else ""))
     return {"ruta": str(final), "archivos": len(entradas), "pacientes": pacientes, "revision_pixeles_pendiente": pendientes,
             "hashes": {rel: h for _, _, h, rel in entradas}, "sha256": huella, "manifiesto_local": str(manifiesto_local), "avisos": avisos,
+            "retiradas_no_verificables": retiradas["problemas"] if retiradas["bloqueo"] else [],
             "demografia": demografia, "exportacion": dict(exportacion), "orden_sin_verificar": sorted(serie for serie, o in orden_series.items() if o and o["criterio"] == CRITERIO_DESEMPATE)}
 
 
@@ -1152,6 +1215,7 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
             paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000])
             return terminar("error", "El paquete no se creó." + texto_restos(e.cuerpo.get("restos", [])))
         t["zip"], t["archivos"] = r["ruta"], r["hashes"]
+        t["retiradas_no_verificables"] = r.get("retiradas_no_verificables", [])
         t["no_mostrables"] = []
         comprobar_que_se_puede_mostrar(t)
         t["revision_pixeles_pendiente"] = r["revision_pixeles_pendiente"]
@@ -1165,8 +1229,10 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         nota_cuadros = f" {varios_cuadros} archivo(s) tienen varios cuadros; el visor de la corrida permite recorrerlos." if varios_cuadros else ""
         nota_visor = (f" {len(t['no_mostrables'])} imagen(es) no se pueden mostrar en el visor ({t['no_mostrables'][0]['motivo']}): "
                       "la revisión de píxeles de esta corrida no se puede registrar aquí.") if t.get("no_mostrables") else ""
-        paso("paquete", "aviso" if sin_verificar or t.get("no_mostrables") else "ok",
-             f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}{nota_cuadros}{nota_visor}",
+        nota_retiradas = (" No se puede verificar el estado de las retiradas (" + texto_de_problemas(t["retiradas_no_verificables"]) + "): la revisión de "
+                          "esta corrida no se podrá registrar hasta que ese diario se pueda leer; el zip queda pendiente, en local.") if t["retiradas_no_verificables"] else ""
+        paso("paquete", "aviso" if sin_verificar or t.get("no_mostrables") or t["retiradas_no_verificables"] else "ok",
+             f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}{nota_cuadros}{nota_visor}{nota_retiradas}",
              r["ruta"] + "\n" + "\n".join(f"{serie}: {o['criterio']}" + (f" ({o['aviso']})" if o["aviso"] else "") for serie, o in sorted(orden_series.items())))
         hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
         terminar("con avisos" if hay_avisos else "ok",
@@ -1381,6 +1447,12 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
     if not avance["completo"]:
         raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cuadros de esta corrida; "
                                  "para declarar que se revisaron todos, todos tienen que haber estado en pantalla")
+    # Antes de tomar el candado y de escribir ninguna evidencia: con el estado de las retiradas sin verificar, no se
+    # registra ninguna revisión ni se publica nada en el destino. El zip pendiente sigue en la carpeta de trabajo.
+    retiradas = estado_de_retiradas()
+    if retiradas["bloqueo"]:
+        registrar("rápido: revisión rechazada; el estado de las retiradas no se puede verificar: " + texto_de_problemas(retiradas["problemas"]))
+        raise RevisionBloqueada(retiradas["problemas"], "registrar la revisión de esta corrida")
     if not CANDADO.acquire(blocking=False):
         raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de registrar la revisión")
     try:
@@ -1418,6 +1490,8 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
                 restos.append(str(registro_preparado))
             if restos:
                 registrar(f"rápido: publicación fallida con restos sin retirar: {', '.join(restos)}")
+            if e.cuerpo.get("retiradas_no_verificables"):
+                raise RevisionBloqueada(e.cuerpo.get("diarios_con_problemas", []), "registrar la revisión de esta corrida", restos)
             if e.cuerpo.get("fallos"):
                 registrar("rápido: revisión rechazada al empaquetar; un archivo cambió entre la comprobación y el empaquetado")
                 raise PublicacionFallida(409, f"{len(e.cuerpo['fallos'])} archivo(s) de esta corrida cambiaron o ya no están; nada se escribió en el destino. Vuelve a ejecutar el modo rápido." + texto_restos(restos), restos)
@@ -1465,6 +1539,8 @@ def rapido_revision(request: Request, cuerpo: dict):
     auth(request)
     try:
         return aplicar_revision_rapido(TRABAJOS.get(str(cuerpo.get("trabajo", ""))), str(cuerpo.get("revisor", "")).strip()[:120])
+    except RevisionBloqueada as e:
+        return JSONResponse(status_code=409, content=e.cuerpo())
     except PublicacionFallida as e:
         return JSONResponse(status_code=e.codigo, content={"detail": e.mensaje, "restos": e.restos})
 
@@ -1779,7 +1855,13 @@ def archivar_registro(ruta: Path) -> dict | None:
 def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "",
                      origen: dict | None = None, mostrado: dict | None = None) -> dict:
     """Escribe el registro de revisión de píxeles de un paciente, ligado a los hashes de sus archivos. El registro
-    anterior, si lo hay, queda intacto en el historial."""
+    anterior, si lo hay, queda intacto en el historial. Una revisión "sin hallazgos" no se registra mientras el estado de
+    las retiradas no se pueda verificar: lanza RevisionBloqueada antes de escribir nada."""
+    if estado == "sin_hallazgos":
+        retiradas = estado_de_retiradas()
+        if retiradas["bloqueo"]:
+            registrar(f"revisión de píxeles: {pac} → rechazada; el estado de las retiradas no se puede verificar: " + texto_de_problemas(retiradas["problemas"]))
+            raise RevisionBloqueada(retiradas["problemas"], "registrar una revisión sin hallazgos")
     try:
         politica = json.loads((TRABAJO / "limpios" / ".politica.json").read_text(encoding="utf-8")).get("politica", "")
     except (OSError, ValueError):
@@ -2321,6 +2403,9 @@ def registrar_revision(request: Request, cuerpo: dict):
     if error:
         raise HTTPException(400, error)
     if estado == "sin_hallazgos":
+        retiradas = estado_de_retiradas()
+        if retiradas["bloqueo"]:                                      # antes de exigir nada más: se dice qué diario requiere atención
+            return JSONResponse(status_code=409, content=RevisionBloqueada(retiradas["problemas"], "registrar una revisión sin hallazgos").cuerpo())
         if not INDICE:
             indexar()
         if any(s_["paciente"] == pac and s_.get("cuadros_max", 1) > 1 for s_ in INDICE.values()):
@@ -2331,7 +2416,10 @@ def registrar_revision(request: Request, cuerpo: dict):
             raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cortes de este paciente; "
                                      "para declarar 'sin hallazgos', todos tienen que haber estado en pantalla")
         mostrado = {"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"], "donde": "pestaña Estudios, en el navegador", "nota": NOTA_MOSTRADO}
-        return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado)
+        try:
+            return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado)
+        except RevisionBloqueada as e:                                # dejó de poder verificarse entre la comprobación y el guardado
+            return JSONResponse(status_code=409, content=e.cuerpo())
     return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
 
 
@@ -2587,8 +2675,10 @@ function pintarResultadoRapido(t) {
   if (t.estado === 'error') { mensaje('#rap-estado', 'error', t.mensaje || 'No se creó ningún zip.'); $('#rap-revision').classList.add('oculto'); return; }
   const nube = t.destino_sincronizado ? ' Ese destino está sincronizado con la nube (' + t.destino_sincronizado + '): el zip solo llegará allí ya revisado.' : '';
   const ciegos = t.no_mostrables || [];
+  const sinVerificar = t.retiradas_no_verificables || [];
+  const notaRetiradas = sinVerificar.length && !t.revisado ? ' No se puede verificar el estado de las retiradas (' + sinVerificar.map(x => x.diario + ': ' + x.motivo).join('; ') + '): la revisión de esta corrida no se puede registrar hasta que ese diario se pueda leer. El zip sigue pendiente, en la carpeta de trabajo.' : '';
   const notaCiegos = ciegos.length ? ' ' + ciegos.length + ' imagen(es) no se pueden mostrar en el visor (' + ciegos[0].archivo + ': ' + ciegos[0].motivo + '): la revisión de píxeles de esta corrida no se puede registrar aquí.' : '';
-  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube + notaCiegos);
+  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube + notaCiegos + notaRetiradas);
   else mensaje('#rap-estado', t.estado === 'con avisos' ? 'aviso' : 'ok', (t.mensaje || '') + ' Zip: ' + t.zip);
   $('#rap-revision').classList.toggle('oculto', !(t.zip && !t.revisado));
   BLOQUEO_REVISION = ciegos.length > 0;
@@ -2863,8 +2953,10 @@ $('#btn-empaquetar').onclick = async () => {
   const o = $('#salida-enviar'); o.classList.remove('oculto'); mensaje('#estado-enviar', 'neutro', 'verificando y empaquetando…'); texto('#salida-enviar', '');
   try { const r = await api('empaquetar', {pacientes: elegidos()}); const pend = r.revision_pixeles_pendiente || [];
     const sinOrden = r.orden_sin_verificar || [];
+    const sinVerif = r.retiradas_no_verificables || [];
+    const notaRet = sinVerif.length ? ' No se puede verificar el estado de las retiradas (' + sinVerif.map(x => x.diario + ': ' + x.motivo).join('; ') + '): ninguna revisión se da por vigente en este paquete.' : '';
     const notaOrden = sinOrden.length ? ' Orden de cortes no verificado en ' + sinOrden.length + ' serie(s): la numeración de esos archivos es un desempate, no un orden anatómico.' : '';
-    mensaje('#estado-enviar', (pend.length || sinOrden.length) ? 'aviso' : 'ok', (pend.length ? 'Paquete creado localmente, con revisión de píxeles pendiente para ' + pend.join(', ') + '. Existe, pero no está listo para compartirse.' : 'Paquete creado localmente con revisión de píxeles vigente y sin hallazgos en todos los pacientes.') + notaOrden);
+    mensaje('#estado-enviar', (pend.length || sinOrden.length || sinVerif.length) ? 'aviso' : 'ok', (pend.length ? 'Paquete creado localmente, con revisión de píxeles pendiente para ' + pend.join(', ') + '. Existe, pero no está listo para compartirse.' : 'Paquete creado localmente con revisión de píxeles vigente y sin hallazgos en todos los pacientes.') + notaOrden + notaRet);
     texto('#salida-enviar', r.ruta + '\n' + r.archivos + ' archivos de ' + r.pacientes.join(', ') + '\nIncluye manifiesto.json con el hash de cada archivo y el estado de la revisión. El mapa privado no entra.'); }
   catch (err) { mensaje('#estado-enviar', 'error', 'Rechazado: ' + err.message); texto('#salida-enviar', err.datos && err.datos.fallos ? Object.entries(err.datos.fallos).map(([p, s]) => p + ': ' + (Array.isArray(s) ? s.join('; ') : s)).join('\n') : ''); }
 };
