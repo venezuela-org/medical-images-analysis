@@ -2019,8 +2019,11 @@ def main() -> None:
     url = f"http://127.0.0.1:{args.puerto}/?t={TOKEN}"
     print(f"PET/CT local {VERSION}")
     print(f"Carpeta de trabajo (work folder): {TRABAJO}")
-    print(f"Abre en el navegador (open in your browser): {url}")
+    # La dirección se imprime cuando el índice está hecho: antes de eso el servidor todavía no escucha, y abrirla da
+    # "conexión rechazada". Con miles de archivos el índice tarda unos segundos.
+    print("Preparando el índice de estudios; con muchos archivos tarda unos segundos... (indexing studies)", flush=True)
     indexar()
+    print(f"Listo. Abre en el navegador (open in your browser): {url}", flush=True)
     registrar(f"app {VERSION} iniciada en 127.0.0.1:{args.puerto}")
     if not args.sin_navegador:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
