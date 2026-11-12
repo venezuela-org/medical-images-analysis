@@ -9,7 +9,7 @@ Para declarar "sin hallazgos" hace falta que todos los cortes hayan estado en pa
 - Un cuadro cuenta como **mostrado** cuando el navegador avisa de que su imagen se cargó en el visor y siguió a la vista un instante, con la pestaña y la imagen visibles. Antes tiene que haberse pedido al visor.
 - En un archivo con varios cuadros cuenta cada cuadro.
 - Las comprobaciones que la aplicación hace por su cuenta, como dibujar una imagen de cada serie para saber si el visor puede con ella, no cuentan.
-- Si un archivo cambia, lo que se había mostrado de él deja de contar.
+- Lo mostrado se liga al contenido. De cada corte se guarda el sha256 de los bytes que se sirvieron al visor, y al registrar la revisión se compara con el sha256 que el archivo tiene en ese momento: si un archivo se sustituyó por otro, aunque tenga el mismo tamaño y la misma fecha, sus cortes no cuentan. El contador que se ve en pantalla es más ligero (mira tamaño y fecha) y sirve de orientación; lo que autoriza es la comparación por contenido.
 
 El recuento aparece como "Mostrados en este navegador: 94 de 5.968 cuadros". **Mostrado no significa revisado.** Que una imagen haya pasado por la pantalla no prueba que alguien la haya mirado con atención; el recuento solo impide declarar que se revisó todo cuando parte no llegó a verse. El botón "Recorrer la serie" pasa los cortes uno a uno por la pantalla; mirarlos sigue siendo cosa de quien revisa.
 
@@ -40,6 +40,12 @@ Lo último es lo importante. Un zip que ya se creó con esa revisión sigue dici
 La declaración de una corrida del modo rápido es un solo acto. Por eso retirar la revisión de la corrida retira también las revisiones de paciente que esa corrida escribió, y retirar una de esas revisiones de paciente retira la corrida y las demás. Una revisión nueva después de una retirada no borra el historial: la primera revisión y su retirada siguen guardadas.
 
 Ningún registro de revisión se sobrescribe sin dejar antes una copia en el historial, tampoco al registrar una revisión nueva sobre otra anterior.
+
+### Retirar y empaquetar a la vez
+
+El empaquetado de la pestaña Enviar, las retiradas, las corridas del modo rápido y el registro de revisiones usan el mismo candado: mientras uno está en marcha, los demás esperan. Además, el empaquetador vuelve a comprobar, antes de dejar evidencias y justo antes de publicar, que la revisión de cada paciente que va a salir como revisado sigue siendo el mismo registro y sigue sin retirar. Si dejó de valer, el paquete no se publica y se dice de qué paciente y por qué; al volver a empaquetar, sale con la revisión pendiente.
+
+El manifiesto de un paquete de Enviar cita la revisión de cada paciente por el sha256 de su registro (`registro_sha256`). Con ese identificador, y no con la fecha, se reconocen los paquetes que dependen de una revisión cuando se retira. Los manifiestos anteriores a este campo se siguen reconociendo por la fecha de la revisión.
 
 ### Una retirada vale desde que se registra
 

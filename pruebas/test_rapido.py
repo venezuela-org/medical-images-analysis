@@ -373,3 +373,25 @@ def test_con_un_diario_de_retirada_ilegible_la_api_rechaza_las_dos_revisiones(sr
     assert estado == 200 and Path(r["zip"]).parent == destino and r["revision_pixeles_pendiente"] == []
     _, estado_trabajo = srv.api(f"trabajo/{t['id']}")
     assert estado_trabajo["retiradas_no_verificables"] == []
+
+
+def test_la_revision_de_estudios_se_liga_al_contenido_mostrado(srv, tmp_path):
+    """Se muestran todos los cortes; después un archivo se sustituye por otro del mismo tamaño y con la misma fecha. La
+    declaración 'sin hallazgos' se rechaza: esos píxeles no han estado en pantalla."""
+    import os
+    t = srv.rapido(caso(tmp_path, "A"))
+    pac = t["pacientes"][0]
+    _, series = srv.api("estudios?refrescar=1")
+    for s in series:
+        for i in range(s["n"]):
+            assert srv.png(f"serie/{s['id']}/corte/{i}")[0] == 200
+            assert srv.api(f"serie/{s['id']}/mostrado", {"i": i})[0] == 200
+    victima = next((srv.trabajo / "limpios" / pac).rglob("*.dcm"))
+    st = os.stat(victima)
+    datos = bytearray(victima.read_bytes())
+    datos[-1] ^= 0xFF
+    victima.write_bytes(bytes(datos))
+    os.utime(victima, ns=(st.st_atime_ns, st.st_mtime_ns))
+    estado, r = srv.api("revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "Prueba"})
+    assert estado == 409 and "se han mostrado 7 de 8 cortes" in r["detail"] and "tal como están ahora" in r["detail"]
+    assert not list((srv.trabajo / "limpios_REPORTES").glob("revision_pixeles_*"))      # no se registró nada

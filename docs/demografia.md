@@ -39,7 +39,7 @@ Si no hay edad calculada pero los archivos traen `PatientAge`, se muestra esa ed
 
 ## Originales repetidos
 
-Dos archivos originales pueden dar el mismo archivo limpio: la fecha de nacimiento se vacía al limpiar, así que dos copias de una instancia con nacimientos distintos quedan idénticas. La limpieza guarda lo que dice cada original, y si no coinciden el estudio muestra el conflicto ("edad no disponible: los archivos del estudio dan edades distintas"). Una copia que difiere en el sexo es otro contenido para la misma instancia: va a cuarentena, no entra en ningún paquete, y el estudio guardado muestra "sexo en conflicto".
+Dos archivos originales pueden dar el mismo archivo limpio: la fecha de nacimiento se vacía al limpiar, así que dos copias de una instancia con nacimientos distintos quedan idénticas. La limpieza guarda lo que dice cada original, y si no coinciden el estudio muestra el conflicto ("edad no disponible: los archivos del estudio dan edades distintas"). Una copia que difiere en el sexo es otro contenido para la misma instancia: va a cuarentena, no entra en ningún paquete, y el estudio guardado muestra "sexo en conflicto". Lo que dice una copia en cuarentena se suma a lo que ya se sabía de ese archivo limpio y nunca lo sustituye, también cuando la copia llega sola en una importación posterior: el archivo guardado sigue siendo el de antes, y la etiqueta no puede pasar a decir otra cosa que lo que contiene.
 
 Al volver a importar una carpeta, lo que digan sus originales sustituye a lo guardado para esos archivos. Así se corrige un dato en origen sin arrastrar el anterior.
 
@@ -47,7 +47,7 @@ Al volver a importar una carpeta, lo que digan sus originales sustituye a lo gua
 
 Nada en los archivos limpios. La política `pet-ct-local/0.4` ya conservaba el sexo, el peso, la talla y la edad informada (opción *Retain Patient Characteristics*), vaciaba la fecha de nacimiento y desplazaba las fechas. Eso sigue igual: los archivos limpios no llevan ningún dato nuevo, sus bytes no cambian y las revisiones de píxeles registradas siguen vigentes.
 
-Lo nuevo es un registro local, `datos-pet/limpios_PRIVADO/demografia.json`, que la limpieza rellena con lo que cada archivo original decía de la edad y el sexo. Contiene valores derivados, sin fechas y sin identidad, y no sale de la computadora; al manifiesto de un paquete solo pasa el resumen de los estudios de ese paquete.
+Lo nuevo es un registro local, `datos-pet/limpios_PRIVADO/demografia.json`, que la limpieza rellena con lo que cada archivo original decía de la edad y el sexo. Contiene valores derivados, sin fechas y sin identidad, y no sale de la computadora. Se escribe de forma atómica, y si alguna vez no se pudiera leer se aparta con otro nombre en lugar de darse por vacío; al manifiesto de un paquete solo pasa el resumen de los estudios de ese paquete.
 
 ## Estudios importados con una versión anterior
 

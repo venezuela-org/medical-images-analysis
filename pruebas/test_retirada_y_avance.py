@@ -85,19 +85,24 @@ def navegador_muestra(app, t: dict, cuales: list[tuple[int, int, int]]) -> dict:
     return avance
 
 
-def revision_clasica(app, pac: str, revisor: str = "Prueba") -> dict:
-    """Lo mismo que hace la pestaña Estudios: se muestran todos los cortes del paciente y se registra 'sin hallazgos'."""
+def mostrar_en_estudios(app, pac: str) -> None:
+    """Lo que hace el navegador en Estudios: cada corte se sirve (se leen sus bytes) y después se avisa de que se mostró."""
     app.indexar()
-    estado = app.MOSTRADOS_ESTUDIOS.setdefault(pac, {"servidos": set(), "mostrados": set()})
     for s in app.INDICE.values():
         if s["paciente"] == pac:
             for _, ruta in s["cortes"]:
-                clave = (ruta, app._firma_archivo(ruta), 1)
-                estado["servidos"].add(clave)
-                estado["mostrados"].add(clave)
-    avance = app.progreso_paciente(pac)
-    assert avance["completo"]
-    return app.guardar_revision(pac, "sin_hallazgos", [], revisor, mostrado={"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"]})
+                app.anotar_servido_estudios(pac, ruta, 1, hashlib.sha256(Path(ruta).read_bytes()).hexdigest())
+                assert app.anotar_mostrado_estudios(pac, ruta, 1)
+
+
+def revision_clasica(app, pac: str, revisor: str = "Prueba") -> dict:
+    """Lo mismo que hace la pestaña Estudios: se muestran todos los cortes del paciente y se registra 'sin hallazgos'."""
+    mostrar_en_estudios(app, pac)
+    actuales = app.hashes_paciente(pac)
+    avance = app.progreso_paciente(pac, actuales)
+    assert avance["completo"] and avance["verificado_por_contenido"]
+    return app.guardar_revision(pac, "sin_hallazgos", [], revisor, archivos=actuales,
+                                mostrado={"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"]})
 
 
 def sha(ruta) -> str:
@@ -171,15 +176,16 @@ def test_en_estudios_sin_hallazgos_exige_haber_mostrado_todos_los_cortes_del_pac
     t = correr(app, caso(tmp_path), tmp_path)
     pac = t["pacientes"][0]
     app.indexar()
-    assert app.progreso_paciente(pac) == {**app.progreso_paciente(pac), "mostrados": 0, "total": 8, "completo": False}
-    estado = app.MOSTRADOS_ESTUDIOS.setdefault(pac, {"servidos": set(), "mostrados": set()})
+    inicial = app.progreso_paciente(pac)
+    assert (inicial["mostrados"], inicial["total"], inicial["completo"]) == (0, 8, False)
     rutas = [ruta for s in app.INDICE.values() for _, ruta in s["cortes"]]
-    for ruta in rutas:
-        estado["mostrados"].add((ruta, app._firma_archivo(ruta), 1))
+    assert app.anotar_mostrado_estudios(pac, rutas[0], 1) is False    # avisar de un corte que no se ha servido no cuenta
+    mostrar_en_estudios(app, pac)
     assert app.progreso_paciente(pac)["completo"] is True
+    assert app.progreso_paciente(pac, app.hashes_paciente(pac))["completo"] is True
     Path(rutas[0]).write_bytes(Path(rutas[0]).read_bytes() + b"\x00")          # un archivo cambia: lo mostrado ya no cuenta
-    avance = app.progreso_paciente(pac)
-    assert avance["mostrados"] == 7 and avance["completo"] is False
+    assert app.progreso_paciente(pac)["mostrados"] == 7
+    assert app.progreso_paciente(pac, app.hashes_paciente(pac))["mostrados"] == 7
 
 
 # ---------------------------------------------------------------------------------------------------------------

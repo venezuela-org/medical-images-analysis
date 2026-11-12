@@ -73,7 +73,7 @@ from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, UID  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True  # elementos privados mal formados no detienen la corrida
 
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 POLITICA = "pet-ct-local/0.4"
 RAIZ_UID = "1.2.826.0.1.3680043.8.498."     # raíz pydicom, libre de uso; identifica los UID reescritos
 DICOM_ROOT = "1.2.840.10008"
@@ -389,6 +389,64 @@ def observaciones_de_registro(valor) -> list[dict]:
     if isinstance(valor, dict):
         return [valor]
     return [o for o in (valor or []) if isinstance(o, dict)]
+
+
+def guardar_registro_demografia(ruta: Path, aceptadas: dict[str, list[dict]], en_conflicto: dict[str, list[dict]], limpios: Path) -> str | None:
+    """Actualiza el registro local de edad y sexo por archivo limpio (valores derivados: ni fechas ni identidad).
+      - `aceptadas`: lo que dicen los originales de esta invocación que dieron o verificaron ese archivo limpio. Sustituyen
+        a lo guardado para ese archivo: volver a importar una carpeta actualiza lo que se sabe de ella.
+      - `en_conflicto`: lo que dicen originales que no se copiaron por ser otra versión de la misma instancia. Se suman a
+        lo que ya había; si no había nada, se parte de lo que dice el propio archivo limpio guardado. Así una copia en
+        cuarentena nunca pisa los datos del archivo que de verdad está en la copia limpia, y el conflicto queda a la vista.
+    La escritura es atómica: temporal en la misma carpeta y renombrado. Si el registro existente no se puede leer, no se
+    da por vacío: se aparta con otro nombre y se devuelve un aviso."""
+    aviso = None
+    registro: dict = {}
+    if ruta.exists():
+        try:
+            registro = json.loads(ruta.read_text(encoding="utf-8"))
+            if not isinstance(registro, dict) or not isinstance(registro.get("archivos", {}), dict):
+                raise ValueError("estructura")
+        except (OSError, ValueError):
+            apartado = ruta.with_name(f"{ruta.name}.ilegible_{dt.datetime.now():%Y%m%d_%H%M%S}")
+            os.replace(ruta, apartado)                                # se conserva tal cual; no se sobrescribe
+            aviso = (f"el registro de demografía no se pudo leer; se conserva como {apartado.name} y se empieza uno nuevo: "
+                     "las edades calculadas de importaciones anteriores vuelven al volver a importar sus carpetas")
+            registro = {}
+    registro.setdefault("version", 1)
+    archivos = registro.setdefault("archivos", {})
+    for rel, observaciones in aceptadas.items():
+        archivos[rel] = list(observaciones)
+    for rel, extras in en_conflicto.items():
+        base = observaciones_de_registro(archivos.get(rel))
+        if not base:                                                  # sin registro previo: lo que dice el archivo limpio guardado
+            try:
+                base = [observacion_de_archivo_limpio(pydicom.dcmread(Path(limpios) / rel, stop_before_pixels=True,
+                                                                      specific_tags=["PatientSex", "PatientAge"]))]
+            except Exception:
+                base = []
+        for o in extras:
+            if o not in base:
+                base.append(o)
+        archivos[rel] = base
+    fd, tmp = tempfile.mkstemp(dir=ruta.parent, prefix=".demografia_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(registro, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, ruta)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return aviso
 
 
 def resumen_demografia(observaciones: list[dict]) -> dict:
@@ -1065,6 +1123,10 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     # dar el mismo archivo limpio (la fecha de nacimiento se vacía al limpiar) y decir edades o sexos distintos; se guardan
     # todas las observaciones distintas de esta invocación, sin quedarse con la del último archivo procesado.
     demografia_nueva: dict[str, list[dict]] = {}
+    # Lo que dicen los originales que NO se copiaron por ser otra versión de una instancia ya guardada (cuarentena por
+    # contenido distinto). Estas observaciones se suman a las que ya había para ese archivo limpio; nunca las sustituyen:
+    # el archivo limpio guardado sigue siendo el de antes.
+    demografia_en_conflicto: dict[str, list[dict]] = {}
     pacientes_vistos: set[str] = set()
     posverif: Counter = Counter()
     problemas_restantes: list[str] = []
@@ -1154,7 +1216,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                 cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": "misma instancia SOP con contenido distinto / same SOP instance, different content"})
                 # El original no se copia, pero lo que dice de la edad y el sexo sí cuenta: es otro registro de la misma
                 # instancia, y si discrepa del ya guardado el estudio debe mostrar el conflicto.
-                anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
+                anotar_observacion(demografia_en_conflicto, ruta_salida.relative_to(salida).as_posix(), observacion)
                 continue
             os.replace(tmp, ruta_salida)
             os.chmod(ruta_salida, 0o600)
@@ -1169,6 +1231,14 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
             cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": f"no se pudo procesar: {type(e).__name__}"})
             continue
 
+    # El registro de demografía se guarda antes de escribir el reporte, para que un aviso suyo llegue al reporte y a la
+    # salida: un registro anterior ilegible no se sustituye en silencio.
+    if demografia_nueva or demografia_en_conflicto:
+        aviso_demografia = guardar_registro_demografia(ruta_mapa.parent / "demografia.json", demografia_nueva, demografia_en_conflicto, salida)
+        if aviso_demografia:
+            avisos.append(aviso_demografia)
+            print("AVISO: " + aviso_demografia)
+
     reporte = {
         "version": VERSION, "politica": POLITICA, "prefijo": args.prefijo,
         "conservar_descripciones": bool(args.conservar_descripciones),
@@ -1180,21 +1250,6 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
         "cuantificacion_pet": dict(suv), "problemas_restantes": sorted(set(problemas_restantes)),
         "avisos": sorted(set(avisos)),
     }
-    if demografia_nueva:
-        # Registro local de edad y sexo por archivo limpio. Solo valores derivados: ni fechas ni identidad. Los archivos
-        # limpios no se tocan; reimportar una carpeta ya importada rellena este registro sin reescribir ninguno.
-        ruta_demografia = ruta_mapa.parent / "demografia.json"
-        try:
-            registro_demografia = json.loads(ruta_demografia.read_text(encoding="utf-8")) if ruta_demografia.exists() else {}
-        except (OSError, ValueError):
-            registro_demografia = {}
-        registro_demografia.setdefault("version", 1)
-        registro_demografia.setdefault("archivos", {}).update(demografia_nueva)
-        ruta_demografia.write_text(json.dumps(registro_demografia, ensure_ascii=False), encoding="utf-8")
-        try:
-            os.chmod(ruta_demografia, 0o600)
-        except OSError:
-            pass
     if getattr(args, "lista_salida", None):
         # Lista exacta de las salidas limpias que corresponden a los archivos de entrada de ESTA invocación
         # (nuevas, actualizadas y duplicados verificados). No depende del índice histórico por carpeta.

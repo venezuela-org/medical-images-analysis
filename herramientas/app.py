@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -620,14 +620,14 @@ def corte(request: Request, sid: str, i: int, ventana: str = "tejido", cuadro: i
         raise HTTPException(404, "serie desconocida")
     i = max(0, min(i, s["n"] - 1))
     ruta = s["cortes"][i][1]
-    firma = _firma_archivo(ruta)
     try:
-        png = render_bytes(Path(ruta).read_bytes(), ventana, cuadro)
+        datos = Path(ruta).read_bytes()                               # una sola lectura: estos bytes se dibujan y se anotan
+        png = render_bytes(datos, ventana, cuadro)
     except ImagenNoMostrable as e:
         raise HTTPException(422, f"este corte no se puede mostrar: {e}")
     except Exception as e:
         raise HTTPException(500, f"no se pudo renderizar el corte: {type(e).__name__}")
-    MOSTRADOS_ESTUDIOS.setdefault(s["paciente"], {"servidos": set(), "mostrados": set()})["servidos"].add((ruta, firma, cuadro))
+    anotar_servido_estudios(s["paciente"], ruta, cuadro, hashlib.sha256(datos).hexdigest())
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
@@ -644,12 +644,8 @@ def serie_mostrado(request: Request, sid: str, cuerpo: dict):
         raise HTTPException(400, "i y cuadro deben ser números")
     if not 0 <= i < s["n"]:
         raise HTTPException(404, "corte fuera de rango")
-    ruta = s["cortes"][i][1]
-    estado = MOSTRADOS_ESTUDIOS.setdefault(s["paciente"], {"servidos": set(), "mostrados": set()})
-    clave = (ruta, _firma_archivo(ruta), cuadro)
-    if clave not in estado["servidos"]:
+    if not anotar_mostrado_estudios(s["paciente"], s["cortes"][i][1], cuadro):
         raise HTTPException(409, "ese corte no se ha servido al visor")
-    estado["mostrados"].add(clave)
     return progreso_paciente(s["paciente"])
 
 
@@ -742,6 +738,15 @@ class RevisionBloqueada(Exception):
 
     def cuerpo(self) -> dict:
         return {"detail": self.mensaje(), "diarios_con_problemas": self.problemas, "retiradas_no_verificables": True, "restos": self.restos}
+
+
+class _RevisionDejoDeValer(Exception):
+    """Uso interno del empaquetador: la revisión de algún paciente dejó de valer entre el principio del empaquetado y la
+    publicación (se retiró, o su registro cambió)."""
+
+    def __init__(self, cambios: dict[str, str]):
+        super().__init__("la revisión dejó de valer")
+        self.cambios = cambios
 
 
 class _RetiradasDejaronDeSerVerificables(Exception):
@@ -876,7 +881,7 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
     else:
         revisiones = {pac: leer_revision(pac) for pac in pacientes}
         pendientes = [pac for pac, r in revisiones.items() if not r.get("lista_para_compartir")]
-        bloque_revision = {pac: {k: r.get(k) for k in ("estado", "vigente", "fecha", "hallazgos", "detalle")} for pac, r in revisiones.items()}
+        bloque_revision = {pac: {k: r.get(k) for k in ("estado", "vigente", "fecha", "hallazgos", "detalle", "registro_sha256")} for pac, r in revisiones.items()}
         aviso_manifiesto = ("paquete creado localmente; la revisión de píxeles está pendiente para los pacientes listados" if pendientes
                             else "revisión de píxeles vigente y sin hallazgos en todos los pacientes")
     manifiesto = {"version_app": VERSION, "politica": politica, "prefijo": prefijo,
@@ -929,10 +934,22 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
         # Antes de dejar ninguna evidencia: si este paquete va a salir como revisado, el estado de las retiradas tiene que
         # seguir pudiéndose verificar ahora, no solo cuando empezó el empaquetado.
         declara_revision = declara_revision_de_corrida or (revision_corrida is None and len(pendientes) < len(pacientes))
-        etapa = "la comprobación del estado de las retiradas"
-        ahora = estado_de_retiradas()
-        if declara_revision and ahora["bloqueo"]:
-            raise _RetiradasDejaronDeSerVerificables(ahora["problemas"])
+
+        def comprobar_que_la_revision_sigue_valiendo() -> None:
+            """Lo que el paquete va a declarar tiene que seguir siendo cierto ahora, y no solo cuando empezó el empaquetado:
+            el estado de las retiradas se puede verificar y, en un paquete de Enviar, la revisión de cada paciente que sale
+            como revisado sigue siendo el mismo registro, sin retirar."""
+            ahora = estado_de_retiradas()
+            if declara_revision and ahora["bloqueo"]:
+                raise _RetiradasDejaronDeSerVerificables(ahora["problemas"])
+            if revision_corrida is None:
+                cambios = {pac: motivo for pac in pacientes if pac not in pendientes
+                           for motivo in [revision_sigue_siendo(pac, revisiones[pac].get("registro_sha256"))] if motivo}
+                if cambios:
+                    raise _RevisionDejoDeValer(cambios)
+
+        etapa = "la comprobación del estado de las revisiones"
+        comprobar_que_la_revision_sigue_valiendo()
 
         # 3. evidencias locales ANTES de publicar: manifiesto externo y lo que pida quien llama
         etapa = "el guardado del manifiesto local"
@@ -944,10 +961,8 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
                                "hashes": {rel: h for _, _, h, rel in entradas}})
 
         # y otra vez justo antes del punto de compromiso, con las evidencias ya preparadas (si falla, se retiran)
-        etapa = "la comprobación del estado de las retiradas"
-        ahora = estado_de_retiradas()
-        if declara_revision and ahora["bloqueo"]:
-            raise _RetiradasDejaronDeSerVerificables(ahora["problemas"])
+        etapa = "la comprobación del estado de las revisiones"
+        comprobar_que_la_revision_sigue_valiendo()
 
         # 4. PUBLICACIÓN (punto de compromiso): el zip aparece con su nombre final de una sola vez
         etapa = "la copia al destino"
@@ -964,6 +979,11 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
         # nada se publicó: se retira todo lo intermedio, y lo que no se pueda retirar se devuelve con su ruta
         restos = [str(resto) for resto in (tmp, parcial, manifiesto_preparado) if resto is not None and not _eliminar(resto)]
         registrar(f"empaquetar: falló {etapa} ({type(e).__name__}); nada publicado" + (f"; sin retirar: {', '.join(restos)}" if restos else ""))
+        if isinstance(e, _RevisionDejoDeValer):
+            detalle = "; ".join(f"{pac}: {motivo}" for pac, motivo in sorted(e.cambios.items()))
+            raise PaqueteRechazado(409, {"detail": "el paquete no se publicó: iba a salir como revisado y la revisión dejó de valer (" + detalle
+                                                   + "). Vuelve a empaquetar: saldrá con la revisión pendiente",
+                                         "revisiones_que_cambiaron": e.cambios, "restos": restos})
         if isinstance(e, _RetiradasDejaronDeSerVerificables):
             raise PaqueteRechazado(409, {"detail": "no se puede publicar un paquete revisado: el estado de las retiradas dejó de poder verificarse ("
                                                    + texto_de_problemas(e.problemas) + "); el zip no se publicó",
@@ -987,6 +1007,17 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
             "demografia": demografia, "exportacion": dict(exportacion), "orden_sin_verificar": sorted(serie for serie, o in orden_series.items() if o and o["criterio"] == CRITERIO_DESEMPATE)}
 
 
+def empaquetar_para_enviar(pacientes: list[str]) -> dict:
+    """El empaquetado de la pestaña Enviar, bajo el mismo candado que las retiradas, las corridas y las revisiones: mientras
+    se empaqueta no se puede retirar una revisión, y al revés. El empaquetador vuelve a comprobarlo de todos modos."""
+    if not CANDADO.acquire(blocking=False):
+        raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de empaquetar")
+    try:
+        return crear_paquete(pacientes)
+    finally:
+        CANDADO.release()
+
+
 @api.post("/empaquetar")
 def empaquetar(request: Request, cuerpo: dict):
     auth(request)
@@ -994,7 +1025,7 @@ def empaquetar(request: Request, cuerpo: dict):
     if not pacientes:
         raise HTTPException(400, "elige al menos un paciente / pick at least one patient")
     try:
-        r = crear_paquete(pacientes)
+        r = empaquetar_para_enviar(pacientes)
         for clave in ("hashes", "sha256", "exportacion", "demografia"):
             r.pop(clave, None)
         return r
@@ -1298,11 +1329,13 @@ def anotar_mostrado_corrida(t: dict, indice: int, k: int, cuadro: int) -> dict:
     return progreso_corrida(t)
 
 
-MOSTRADOS_ESTUDIOS: dict[str, dict[str, set]] = {}      # paciente → {"servidos": {...}, "mostrados": {...}} de (ruta, firma, cuadro)
+# paciente → {"servidos": {(ruta, cuadro): sha256 de los bytes servidos}, "mostrados": {(ruta, cuadro): (sha256, firma)}}
+MOSTRADOS_ESTUDIOS: dict[str, dict[str, dict]] = {}
 
 
 def _firma_archivo(ruta: str) -> str:
-    """Tamaño y fecha de modificación: si el archivo cambia, lo ya mostrado deja de contar."""
+    """Tamaño y fecha de modificación. Solo sirve para que el contador de la pantalla baje pronto cuando un archivo
+    cambia; lo que autoriza una revisión es el sha256 de los bytes que se mostraron, no esta firma."""
     try:
         st = os.stat(ruta)
         return f"{st.st_size}:{st.st_mtime_ns}"
@@ -1310,17 +1343,48 @@ def _firma_archivo(ruta: str) -> str:
         return "ausente"
 
 
-def progreso_paciente(pac: str) -> dict:
-    """Cortes del paciente (toda la serie guardada, un cuadro por archivo) que han estado en pantalla en Estudios."""
-    mostrados = (MOSTRADOS_ESTUDIOS.get(pac) or {}).get("mostrados") or set()
+def anotar_servido_estudios(pac: str, ruta: str, cuadro: int, huella: str) -> None:
+    MOSTRADOS_ESTUDIOS.setdefault(pac, {"servidos": {}, "mostrados": {}})["servidos"][(ruta, cuadro)] = huella
+
+
+def anotar_mostrado_estudios(pac: str, ruta: str, cuadro: int) -> bool:
+    """El navegador dice que tuvo ese corte en pantalla. Cuenta con el sha256 de los bytes que se le sirvieron."""
+    estado = MOSTRADOS_ESTUDIOS.setdefault(pac, {"servidos": {}, "mostrados": {}})
+    huella = estado["servidos"].get((ruta, cuadro))
+    if huella is None:
+        return False
+    estado["mostrados"][(ruta, cuadro)] = (huella, _firma_archivo(ruta))
+    return True
+
+
+def progreso_paciente(pac: str, hashes: dict[str, str] | None = None) -> dict:
+    """Cortes del paciente (toda la serie guardada, un cuadro por archivo) que han estado en pantalla en Estudios.
+    Sin `hashes` es el contador de la pantalla: rápido, por tamaño y fecha. Con `hashes` (los sha256 actuales de los
+    archivos del paciente) es la comprobación que autoriza: un corte cuenta solo si los bytes que se mostraron son, por
+    su sha256, los que el archivo tiene ahora."""
+    mostrados = (MOSTRADOS_ESTUDIOS.get(pac) or {}).get("mostrados") or {}
+    base = carpeta_paciente(pac).resolve() if hashes is not None else None
     series, total, vistos = [], 0, 0
     for sid, s_ in INDICE.items():
         if s_["paciente"] != pac:
             continue
-        n = sum(1 for _, ruta in s_["cortes"] if (ruta, _firma_archivo(ruta), 1) in mostrados)
+        n = 0
+        for _, ruta in s_["cortes"]:
+            marca = mostrados.get((ruta, 1))
+            if marca is None:
+                continue
+            if hashes is None:
+                n += marca[1] == _firma_archivo(ruta)
+            else:
+                try:
+                    rel = Path(ruta).resolve().relative_to(base).as_posix()
+                except ValueError:
+                    continue
+                n += marca[0] == hashes.get(rel)
         series.append({"serie": sid, "total": s_["n"], "mostrados": n})
         total, vistos = total + s_["n"], vistos + n
-    return {"mostrados": vistos, "total": total, "completo": total > 0 and vistos == total, "series": series, "nota": NOTA_MOSTRADO}
+    return {"mostrados": vistos, "total": total, "completo": total > 0 and vistos == total, "series": series,
+            "verificado_por_contenido": hashes is not None, "nota": NOTA_MOSTRADO}
 
 
 def anotar_no_mostrable(t: dict, indice: int, k: int, cuadro: int, motivo: str) -> None:
@@ -1807,7 +1871,9 @@ def evaluar_registro_revision(r: dict, actuales: dict[str, str]) -> dict:
 
 
 def leer_revision(pac: str) -> dict:
-    """Estado de la revisión de píxeles de un paciente, comprobando que los archivos revisados no cambiaron."""
+    """Estado de la revisión de píxeles de un paciente, comprobando que los archivos revisados no cambiaron. Cuando hay
+    registro, el resultado lleva `registro_sha256`: la identidad exacta de ese registro, que es lo que citan los
+    manifiestos de los paquetes y lo que alcanzan las retiradas."""
     ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
     if not ruta.exists():
         return {"estado": "pendiente", "vigente": False, "lista_para_compartir": False, "detalle": "sin revisión registrada"}
@@ -1816,21 +1882,41 @@ def leer_revision(pac: str) -> dict:
         r = json.loads(datos.decode("utf-8"))
     except (OSError, ValueError):
         return {"estado": "pendiente", "vigente": False, "lista_para_compartir": False, "detalle": "registro ilegible"}
+    huella = hashlib.sha256(datos).hexdigest()
+    if r.get("estado") == "retirada":                                 # el propio registro ya lo dice; no hace falta ningún diario
+        return {**evaluar_registro_revision(r, {}), "registro_sha256": huella}
+    try:
+        diario = retirada_que_cubre("paciente", pac, huella)
+    except RetiradasNoVerificables as e:
+        return {**revision_no_verificable(pac, e.problemas), "registro_sha256": huella}
     # Una retirada comprometida manda sobre el registro, aunque el registro todavía no se haya actualizado: en cuanto la
     # retirada existe, esa revisión deja de autorizar que se comparta nada.
-    if r.get("estado") == "retirada":                                 # el propio registro ya lo dice; no hace falta ningún diario
-        return evaluar_registro_revision(r, {})
-    try:
-        diario = retirada_que_cubre("paciente", pac, hashlib.sha256(datos).hexdigest())
-    except RetiradasNoVerificables as e:
-        return revision_no_verificable(pac, e.problemas)
     if diario is not None:
         ret = diario["retirada"]
         return {"paciente": pac, "estado": "retirada", "vigente": False, "lista_para_compartir": False,
                 "detalle": f"revisión retirada el {ret['fecha']} por {ret['quien']}: {ret['motivo']} (su registro está pendiente de actualizar)",
                 "retirada": ret, "retirada_id": diario["id"], "registro_pendiente_de_actualizar": True,
-                "paquetes_afectados": diario.get("paquetes_afectados", [])}
-    return evaluar_registro_revision(r, hashes_paciente(pac))
+                "paquetes_afectados": diario.get("paquetes_afectados", []), "registro_sha256": huella}
+    return {**evaluar_registro_revision(r, hashes_paciente(pac)), "registro_sha256": huella}
+
+
+def revision_sigue_siendo(pac: str, huella_registro: str | None) -> str | None:
+    """Comprobación ligera, para el instante anterior a publicar: ¿la revisión de este paciente sigue siendo el mismo
+    registro y sigue sin retirar? Devuelve None si sí, o el motivo si no. No vuelve a leer las imágenes."""
+    ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
+    try:
+        datos = ruta.read_bytes()
+    except OSError:
+        return "su registro de revisión ya no se puede leer"
+    actual = hashlib.sha256(datos).hexdigest()
+    if actual != huella_registro:
+        return "su registro de revisión cambió mientras se empaquetaba"
+    try:
+        if retirada_que_cubre("paciente", pac, actual) is not None:
+            return "su revisión se retiró mientras se empaquetaba"
+    except RetiradasNoVerificables as e:
+        return "el estado de las retiradas dejó de poder verificarse (" + texto_de_problemas(e.problemas) + ")"
+    return None
 
 
 def archivar_registro(ruta: Path) -> dict | None:
@@ -1853,7 +1939,7 @@ def archivar_registro(ruta: Path) -> dict | None:
 
 
 def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "",
-                     origen: dict | None = None, mostrado: dict | None = None) -> dict:
+                     origen: dict | None = None, mostrado: dict | None = None, archivos: dict[str, str] | None = None) -> dict:
     """Escribe el registro de revisión de píxeles de un paciente, ligado a los hashes de sus archivos. El registro
     anterior, si lo hay, queda intacto en el historial. Una revisión "sin hallazgos" no se registra mientras el estado de
     las retiradas no se pueda verificar: lanza RevisionBloqueada antes de escribir nada."""
@@ -1868,7 +1954,7 @@ def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, 
         politica = ""
     registro = {"paciente": pac, "estado": estado, "hallazgos": hallazgos, "notas": notas, "revisor": revisor,
                 "fecha": dt.datetime.now().isoformat(timespec="seconds"), "app": VERSION, "politica": politica,
-                "archivos": hashes_paciente(pac)}
+                "archivos": dict(archivos) if archivos is not None else hashes_paciente(pac)}   # los hashes ya comprobados, si se dan
     if origen:
         registro["origen"] = origen
     if mostrado:
@@ -2082,9 +2168,15 @@ def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
                 continue
             afectados = sorted(m.get("pacientes", []))
         else:                                                         # paquete de Enviar: depende de la revisión de cada paciente
+            def cita(pac: str, a: dict) -> bool:
+                """¿El manifiesto cita exactamente el registro que se retira? Por su sha256; los manifiestos anteriores a
+                ese campo solo llevan la fecha de la revisión, y se comparan por ella."""
+                b = bloque.get(pac) or {}
+                if b.get("registro_sha256"):
+                    return b["registro_sha256"] == a.get("sha256")
+                return b.get("fecha") == a.get("fecha_revision")
             afectados = sorted(pac for pac, a in pacientes.items()
-                               if pac in m.get("pacientes", []) and pac not in m.get("revision_pixeles_pendiente", [])
-                               and (bloque.get(pac) or {}).get("fecha") == a.get("fecha_revision"))
+                               if pac in m.get("pacientes", []) and pac not in m.get("revision_pixeles_pendiente", []) and cita(pac, a))
             if not afectados:
                 continue
         encontrados[nombre] = {"zip": nombre, "destino": z.get("destino") or str(carpeta), "sha256": z.get("sha256"),
@@ -2411,13 +2503,14 @@ def registrar_revision(request: Request, cuerpo: dict):
         if any(s_["paciente"] == pac and s_.get("cuadros_max", 1) > 1 for s_ in INDICE.values()):
             raise HTTPException(409, "este paciente tiene archivos con varios cuadros y la pestaña Estudios muestra uno por archivo; "
                                      "para registrar 'sin hallazgos' recorre todos los cuadros en el visor de una corrida del modo rápido")
-        avance = progreso_paciente(pac)
+        actuales = hashes_paciente(pac)                               # una lectura de los archivos: con ella se comprueba y se registra
+        avance = progreso_paciente(pac, actuales)
         if not avance["completo"]:
-            raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cortes de este paciente; "
-                                     "para declarar 'sin hallazgos', todos tienen que haber estado en pantalla")
+            raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cortes de este paciente "
+                                     "tal como están ahora; para declarar 'sin hallazgos', todos tienen que haber estado en pantalla")
         mostrado = {"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"], "donde": "pestaña Estudios, en el navegador", "nota": NOTA_MOSTRADO}
         try:
-            return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado)
+            return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado, archivos=actuales)
         except RevisionBloqueada as e:                                # dejó de poder verificarse entre la comprobación y el guardado
             return JSONResponse(status_code=409, content=e.cuerpo())
     return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
