@@ -55,7 +55,7 @@ import pydicom  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 SAL = secrets.token_hex(8)          # etiquetas con sal nueva en cada corrida / fresh salt per run
 TOL_ORIENTACION = 1e-3
 TOL_DUPLICADO_MM = 1e-3
@@ -80,10 +80,13 @@ def cruz(a, b):
     return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 
 
-def leer_imagenes(carpeta: Path) -> tuple[list[dict], int]:
-    """Un registro por imagen con identificadores completos (nunca se imprimen) y geometría."""
+def leer_imagenes(carpeta: Path, solo: set[Path] | None = None) -> tuple[list[dict], int]:
+    """Un registro por imagen con identificadores completos (nunca se imprimen) y geometría.
+    Con `solo`, únicamente los archivos de ese conjunto."""
     imagenes, omitidos = [], 0
     for ruta in iter_archivos(carpeta):
+        if solo is not None and Path(ruta).resolve() not in solo:
+            continue
         try:
             ds = pydicom.dcmread(ruta, force=True, stop_before_pixels=True)
             sop = str(ds.get("SOPClassUID", "")) or str(ds.file_meta.get("MediaStorageSOPClassUID", ""))
@@ -225,12 +228,22 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Clasificación de pares CT + PET de un caso (pairing check)")
     p.add_argument("caso")
     p.add_argument("--json")
+    p.add_argument("--solo-lista", help="JSON con 'archivos': rutas a las que se limita el análisis, absolutas o relativas "
+                                        "a la carpeta limpios/ que contiene el caso (o al propio caso)")
     args = p.parse_args(argv)
     carpeta = Path(args.caso).expanduser()
     if not carpeta.is_dir():
         print("No existe la carpeta (folder not found)")
         return 2
-    imagenes, omitidos = leer_imagenes(carpeta)
+    solo = None
+    if args.solo_lista:
+        try:
+            base = next((a for a in carpeta.resolve().parents if a.name == "limpios"), carpeta.resolve())
+            solo = {(base / Path(*str(r).split("/"))).resolve() for r in json.loads(Path(args.solo_lista).read_text(encoding="utf-8"))["archivos"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            print("No se pudo leer la lista del conjunto a analizar (cannot read the file list)")
+            return 2
+    imagenes, omitidos = leer_imagenes(carpeta, solo)
     if not imagenes:
         print("No se encontraron imágenes CT, PET o MR (no CT, PET or MR images found)")
         return 2

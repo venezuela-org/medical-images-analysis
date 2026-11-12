@@ -73,7 +73,7 @@ from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, UID  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True  # elementos privados mal formados no detienen la corrida
 
-VERSION = "0.4.6"
+VERSION = "0.4.10"
 POLITICA = "pet-ct-local/0.4"
 RAIZ_UID = "1.2.826.0.1.3680043.8.498."     # raíz pydicom, libre de uso; identifica los UID reescritos
 DICOM_ROOT = "1.2.840.10008"
@@ -275,6 +275,245 @@ def limitar_edad(valor: str) -> str:
     if m and m.group(2) == "Y" and int(m.group(1)) >= 90:
         return "090Y"
     return valor
+
+
+# --------------------------------------------------------------------------------------
+# demografía del estudio: edad en la fecha del estudio y sexo registrado
+# --------------------------------------------------------------------------------------
+# La edad se calcula con la fecha de nacimiento y la fecha del estudio ORIGINALES, antes de vaciar la primera y
+# desplazar la segunda. De aquí solo salen la edad y, si no se puede calcular, el motivo: ninguna fecha.
+# La edad pertenece al estudio, no al paciente. Sigue la regla de la política para PatientAge: 90 años o más se agrupan.
+# El sexo es el registrado en PatientSex; no se infiere de nada.
+
+EDAD_AGRUPADA_DESDE, EDAD_PLAUSIBLE_MAXIMA = 90, 130
+MOTIVO_HISTORICO = ("este archivo se importó con una versión anterior, que no calculaba la edad; "
+                    "vuelve a importar la carpeta original para calcularla")
+UNIDADES_AS = {"Y": "años", "M": "meses", "W": "semanas", "D": "días"}
+
+
+def _fecha_da(valor) -> tuple[dt.date | None, str]:
+    """Fecha DICOM (DA, AAAAMMDD) → (fecha, problema). El problema nunca contiene el valor."""
+    texto = str(valor or "").strip()
+    if not texto:
+        return None, "falta"
+    if not re.fullmatch(r"\d{8}", texto):
+        return None, "no válida"
+    try:
+        return dt.date(int(texto[:4]), int(texto[4:6]), int(texto[6:8])), ""
+    except ValueError:
+        return None, "no válida"
+
+
+def edad_en_estudio(nacimiento, estudio) -> dict:
+    """Edad cumplida en la fecha del estudio. Quien nació un 29 de febrero cumple el 1 de marzo en los años no bisiestos.
+    Devuelve {'estado': 'calculada', 'valor', 'unidad', 'agrupada'} o {'estado': 'no_disponible', 'motivo'}."""
+    n, pn = _fecha_da(nacimiento)
+    e, pe = _fecha_da(estudio)
+    motivos = []
+    if pn:
+        motivos.append("falta la fecha de nacimiento" if pn == "falta" else "la fecha de nacimiento no es válida")
+    if pe:
+        motivos.append("falta la fecha del estudio" if pe == "falta" else "la fecha del estudio no es válida")
+    if motivos:
+        return {"estado": "no_disponible", "motivo": "; ".join(motivos)}
+    if e < n:
+        return {"estado": "no_disponible", "motivo": "la fecha del estudio es anterior a la de nacimiento"}
+    anios = e.year - n.year - ((e.month, e.day) < (n.month, n.day))
+    if anios > EDAD_PLAUSIBLE_MAXIMA:
+        return {"estado": "no_disponible", "motivo": "las fechas dan una edad fuera de un rango plausible"}
+    if anios >= EDAD_AGRUPADA_DESDE:
+        return {"estado": "calculada", "valor": EDAD_AGRUPADA_DESDE, "unidad": "años", "agrupada": True}
+    if anios >= 1:
+        return {"estado": "calculada", "valor": anios, "unidad": "años", "agrupada": False}
+    meses = (e.year - n.year) * 12 + e.month - n.month - (e.day < n.day)
+    if meses >= 1:
+        return {"estado": "calculada", "valor": meses, "unidad": "meses", "agrupada": False}
+    dias = (e - n).days
+    if dias >= 7:
+        return {"estado": "calculada", "valor": dias // 7, "unidad": "semanas", "agrupada": False}
+    return {"estado": "calculada", "valor": dias, "unidad": "días", "agrupada": False}
+
+
+def edad_informada(valor) -> dict | None:
+    """PatientAge del DICOM (AS: nnnD, nnnW, nnnM o nnnY) como edad INFORMADA por el equipo; None si falta o no es válida."""
+    m = re.fullmatch(r"(\d{1,3})([DWMY])", str(valor or "").strip())
+    if not m:
+        return None
+    numero, unidad = int(m.group(1)), UNIDADES_AS[m.group(2)]
+    if unidad == "años" and numero >= EDAD_AGRUPADA_DESDE:
+        return {"valor": EDAD_AGRUPADA_DESDE, "unidad": "años", "agrupada": True}
+    return {"valor": numero, "unidad": unidad, "agrupada": False}
+
+
+def texto_edad(valor: int, unidad: str, agrupada: bool = False) -> str:
+    if agrupada:
+        return f"{EDAD_AGRUPADA_DESDE} años o más"
+    if unidad == "días" and valor == 0:
+        return "menos de 1 día"
+    singular = {"años": "año", "meses": "mes", "semanas": "semana", "días": "día"}
+    return f"{valor} {singular[unidad] if valor == 1 else unidad}"
+
+
+def sexo_registrado(valor) -> str:
+    """'F', 'M' u 'O' tal como constan; '' si falta; '?' si el valor no es uno de los tres del estándar."""
+    texto = str(valor or "").strip().upper()
+    return texto if texto in ("F", "M", "O") else ("" if not texto else "?")
+
+
+def observacion_demografica(ds) -> dict:
+    """Lo que un archivo ORIGINAL dice de la edad y el sexo. Se llama antes de limpiar el dataset. No guarda fechas."""
+    edad = edad_en_estudio(ds.get("PatientBirthDate", ""), ds.get("StudyDate", ""))
+    informada = edad_informada(ds.get("PatientAge", ""))
+    return {"e": ["c", edad["valor"], edad["unidad"], edad["agrupada"]] if edad["estado"] == "calculada" else ["n", edad["motivo"]],
+            "i": [informada["valor"], informada["unidad"], informada["agrupada"]] if informada else None,
+            "s": sexo_registrado(ds.get("PatientSex", ""))}
+
+
+def observacion_de_archivo_limpio(ds) -> dict:
+    """Para archivos limpios sin registro (importados con una versión anterior): el sexo y la edad informada siguen en
+    el archivo limpio; la edad calculada no se puede obtener sin las fechas originales."""
+    informada = edad_informada(ds.get("PatientAge", ""))
+    return {"e": ["n", MOTIVO_HISTORICO], "i": [informada["valor"], informada["unidad"], informada["agrupada"]] if informada else None,
+            "s": sexo_registrado(ds.get("PatientSex", ""))}
+
+
+def anotar_observacion(registro: dict[str, list[dict]], ruta_limpia: str, observacion: dict) -> None:
+    """Añade la observación de un original a las de su archivo limpio, sin repetir las idénticas ni descartar las distintas."""
+    lista = registro.setdefault(ruta_limpia, [])
+    if observacion not in lista:
+        lista.append(observacion)
+
+
+def observaciones_de_registro(valor) -> list[dict]:
+    """Las observaciones de un archivo tal como están en el registro: una lista, o un solo objeto en registros antiguos."""
+    if isinstance(valor, dict):
+        return [valor]
+    return [o for o in (valor or []) if isinstance(o, dict)]
+
+
+def guardar_registro_demografia(ruta: Path, aceptadas: dict[str, list[dict]], en_conflicto: dict[str, list[dict]], limpios: Path) -> str | None:
+    """Actualiza el registro local de edad y sexo por archivo limpio (valores derivados: ni fechas ni identidad).
+      - `aceptadas`: lo que dicen los originales de esta invocación que dieron o verificaron ese archivo limpio. Sustituyen
+        a lo guardado para ese archivo: volver a importar una carpeta actualiza lo que se sabe de ella.
+      - `en_conflicto`: lo que dicen originales que no se copiaron por ser otra versión de la misma instancia. Se suman a
+        lo que ya había; si no había nada, se parte de lo que dice el propio archivo limpio guardado. Así una copia en
+        cuarentena nunca pisa los datos del archivo que de verdad está en la copia limpia, y el conflicto queda a la vista.
+    La escritura es atómica: temporal en la misma carpeta y renombrado. Si el registro existente no se puede leer, no se
+    da por vacío: se aparta con otro nombre y se devuelve un aviso."""
+    aviso = None
+    registro: dict = {}
+    if ruta.exists():
+        try:
+            registro = json.loads(ruta.read_text(encoding="utf-8"))
+            if not isinstance(registro, dict) or not isinstance(registro.get("archivos", {}), dict):
+                raise ValueError("estructura")
+        except (OSError, ValueError):
+            apartado = ruta.with_name(f"{ruta.name}.ilegible_{dt.datetime.now():%Y%m%d_%H%M%S}")
+            os.replace(ruta, apartado)                                # se conserva tal cual; no se sobrescribe
+            aviso = (f"el registro de demografía no se pudo leer; se conserva como {apartado.name} y se empieza uno nuevo: "
+                     "las edades calculadas de importaciones anteriores vuelven al volver a importar sus carpetas")
+            registro = {}
+    registro.setdefault("version", 1)
+    archivos = registro.setdefault("archivos", {})
+    for rel, observaciones in aceptadas.items():
+        archivos[rel] = list(observaciones)
+    for rel, extras in en_conflicto.items():
+        base = observaciones_de_registro(archivos.get(rel))
+        if not base:                                                  # sin registro previo: lo que dice el archivo limpio guardado
+            try:
+                base = [observacion_de_archivo_limpio(pydicom.dcmread(Path(limpios) / rel, stop_before_pixels=True,
+                                                                      specific_tags=["PatientSex", "PatientAge"]))]
+            except Exception:
+                base = []
+        for o in extras:
+            if o not in base:
+                base.append(o)
+        archivos[rel] = base
+    fd, tmp = tempfile.mkstemp(dir=ruta.parent, prefix=".demografia_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(registro, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, ruta)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return aviso
+
+
+def resumen_demografia(observaciones: list[dict]) -> dict:
+    """Resumen de UN estudio a partir de las observaciones de sus originales (una o más por archivo limpio). Nunca elige en
+    silencio entre valores distintos."""
+    n = len(observaciones)
+    # sexo
+    sexos = sorted({o["s"] for o in observaciones if o["s"] in ("F", "M", "O")})
+    sin_sexo = sum(1 for o in observaciones if o["s"] == "")
+    raros = sum(1 for o in observaciones if o["s"] == "?")
+    avisos_sexo = []
+    if len(sexos) > 1:
+        sexo = {"estado": "conflicto", "valor": None, "valores": sexos}
+        avisos_sexo.append(f"los archivos del estudio registran sexos distintos ({', '.join(sexos)}); no se elige ninguno")
+    elif len(sexos) == 1:
+        sexo = {"estado": "registrado", "valor": sexos[0]}
+        if sin_sexo:
+            avisos_sexo.append(f"{sin_sexo} de {n} original(es) no registran el sexo")
+    else:
+        sexo = {"estado": "no_registrado", "valor": None}
+    if raros:
+        avisos_sexo.append(f"{raros} de {n} original(es) traen en PatientSex un valor que no es F, M ni O")
+    sexo["fuente"] = "PatientSex del DICOM; no se infiere"
+    sexo["avisos"] = avisos_sexo
+    # edad
+    calculadas = sorted({tuple(o["e"][1:]) for o in observaciones if o["e"][0] == "c"})
+    motivos = sorted({o["e"][1] for o in observaciones if o["e"][0] == "n"})
+    sin_calcular = sum(1 for o in observaciones if o["e"][0] == "n")
+    informadas = sorted({tuple(o["i"]) for o in observaciones if o.get("i")})
+    avisos_edad = []
+    if len(calculadas) == 1:
+        valor, unidad, agrupada = calculadas[0]
+        edad = {"estado": "calculada", "valor": valor, "unidad": unidad, "agrupada": agrupada, "texto": texto_edad(valor, unidad, agrupada),
+                "fuente": "calculada con la fecha de nacimiento y la fecha del estudio originales, antes de anonimizar las fechas", "motivo": None}
+        if sin_calcular:
+            avisos_edad.append(f"en {sin_calcular} de {n} original(es) no se pudo calcular la edad: {'; '.join(motivos)}")
+        distintas = [i for i in informadas if tuple(i) != (valor, unidad, agrupada)]
+        if distintas:
+            avisos_edad.append("la edad informada por el equipo (" + ", ".join(texto_edad(*i) for i in distintas) + ") no coincide con la calculada")
+    elif len(calculadas) > 1:
+        edad = {"estado": "no_disponible", "valor": None, "unidad": None, "agrupada": False, "texto": None, "fuente": None,
+                "motivo": "los archivos del estudio dan edades distintas; sus fechas no son coherentes entre sí"}
+    elif len(informadas) == 1:
+        valor, unidad, agrupada = informadas[0]
+        edad = {"estado": "informada", "valor": valor, "unidad": unidad, "agrupada": agrupada, "texto": texto_edad(valor, unidad, agrupada),
+                "fuente": "PatientAge del DICOM: edad informada por el equipo, no calculada", "motivo": "; ".join(motivos) or None}
+        avisos_edad.append("edad informada por el equipo, no calculada: " + ("; ".join(motivos) or "sin fechas para calcularla"))
+    else:
+        motivo = "; ".join(motivos) or "sin datos para calcularla"
+        if len(informadas) > 1:
+            motivo += "; además, PatientAge no es coherente entre los archivos del estudio"
+        edad = {"estado": "no_disponible", "valor": None, "unidad": None, "agrupada": False, "texto": None, "fuente": None, "motivo": motivo}
+    edad["avisos"] = avisos_edad
+    return {"sexo": sexo, "edad_en_el_estudio": edad}
+
+
+def etiqueta_demografia(paciente: str, resumen: dict) -> str:
+    """Identificador anónimo, sexo registrado y edad en el estudio, siempre en ese orden y separados: ANON-0001 · F · 54 años en el estudio."""
+    sexo, edad = resumen["sexo"], resumen["edad_en_el_estudio"]
+    sexo_txt = sexo["valor"] if sexo["estado"] == "registrado" else ("sexo en conflicto" if sexo["estado"] == "conflicto" else "sexo no registrado")
+    if edad["estado"] == "calculada":
+        edad_txt = f"{edad['texto']} en el estudio"
+    elif edad["estado"] == "informada":
+        edad_txt = f"{edad['texto']} (edad informada por el equipo)"
+    else:
+        edad_txt = "edad no disponible"
+    return f"{paciente} · {sexo_txt} · {edad_txt}"
 
 
 def componentes_identidad(nombre: str, pid: str) -> list[str]:
@@ -879,6 +1118,15 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     cuarentena: list[dict] = []
     omitidos: Counter = Counter()
     escritos = duplicados = actualizados = ya_anonimizados = 0
+    aceptados: list[str] = []          # salidas limpias de ESTA invocación: escritas, actualizadas o duplicados verificados
+    # ruta limpia → lo que sus originales dicen de edad y sexo (sin fechas). Es una LISTA: dos originales distintos pueden
+    # dar el mismo archivo limpio (la fecha de nacimiento se vacía al limpiar) y decir edades o sexos distintos; se guardan
+    # todas las observaciones distintas de esta invocación, sin quedarse con la del último archivo procesado.
+    demografia_nueva: dict[str, list[dict]] = {}
+    # Lo que dicen los originales que NO se copiaron por ser otra versión de una instancia ya guardada (cuarentena por
+    # contenido distinto). Estas observaciones se suman a las que ya había para ese archivo limpio; nunca las sustituyen:
+    # el archivo limpio guardado sigue siendo el de antes.
+    demografia_en_conflicto: dict[str, list[dict]] = {}
     pacientes_vistos: set[str] = set()
     posverif: Counter = Counter()
     problemas_restantes: list[str] = []
@@ -911,6 +1159,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                 continue
             _ = ds.PixelData  # fuerza lectura completa; si falla, cuarentena
 
+            observacion = observacion_demografica(ds)      # antes de limpiar: después ya no hay fecha de nacimiento ni fecha original
             pac, aviso = mapa.paciente(ds)
             if aviso:
                 avisos.append(aviso)
@@ -952,19 +1201,28 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     duplicados += 1
                     os.unlink(tmp)
                     indice.anotar(ruta_salida, ruta, entrada)   # el duplicado verificado también queda indexado
+                    aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 if solo_cambia_version(ruta_salida, nuevos_bytes):
                     os.replace(tmp, ruta_salida)                 # misma imagen limpia escrita por una versión anterior: se actualiza en el sitio
                     os.chmod(ruta_salida, 0o600)
                     actualizados += 1
                     indice.anotar(ruta_salida, ruta, entrada)
+                    aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 os.unlink(tmp)
                 cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": "misma instancia SOP con contenido distinto / same SOP instance, different content"})
+                # El original no se copia, pero lo que dice de la edad y el sexo sí cuenta: es otro registro de la misma
+                # instancia, y si discrepa del ya guardado el estudio debe mostrar el conflicto.
+                anotar_observacion(demografia_en_conflicto, ruta_salida.relative_to(salida).as_posix(), observacion)
                 continue
             os.replace(tmp, ruta_salida)
             os.chmod(ruta_salida, 0o600)
             indice.anotar(ruta_salida, ruta, entrada)
+            aceptados.append(ruta_salida.relative_to(salida).as_posix())
+            anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
             posverif["limpios / clean"] += 1
             escritos += 1
             if escritos % 200 == 0:
@@ -972,6 +1230,14 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
         except Exception as e:
             cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": f"no se pudo procesar: {type(e).__name__}"})
             continue
+
+    # El registro de demografía se guarda antes de escribir el reporte, para que un aviso suyo llegue al reporte y a la
+    # salida: un registro anterior ilegible no se sustituye en silencio.
+    if demografia_nueva or demografia_en_conflicto:
+        aviso_demografia = guardar_registro_demografia(ruta_mapa.parent / "demografia.json", demografia_nueva, demografia_en_conflicto, salida)
+        if aviso_demografia:
+            avisos.append(aviso_demografia)
+            print("AVISO: " + aviso_demografia)
 
     reporte = {
         "version": VERSION, "politica": POLITICA, "prefijo": args.prefijo,
@@ -984,6 +1250,16 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
         "cuantificacion_pet": dict(suv), "problemas_restantes": sorted(set(problemas_restantes)),
         "avisos": sorted(set(avisos)),
     }
+    if getattr(args, "lista_salida", None):
+        # Lista exacta de las salidas limpias que corresponden a los archivos de entrada de ESTA invocación
+        # (nuevas, actualizadas y duplicados verificados). No depende del índice histórico por carpeta.
+        lista = Path(args.lista_salida)
+        lista.write_text(json.dumps({"version": VERSION, "archivos": sorted(set(aceptados)), "entradas_aceptadas": len(aceptados)},
+                                    ensure_ascii=False), encoding="utf-8")
+        try:
+            os.chmod(lista, 0o600)
+        except OSError:
+            pass
     carpeta_reportes = salida.parent / f"{salida.name}_REPORTES"
     carpeta_reportes.mkdir(parents=True, exist_ok=True)
     marca = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1140,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("salida")
     a.add_argument("--mapa", help="ruta del mapa privado (private map path)")
     a.add_argument("--prefijo", default="ANON", help="prefijo de seudónimo, letras y dígitos (pseudonym prefix)")
+    a.add_argument("--lista-salida", help="escribe aquí (JSON) las rutas limpias exactas que produjo o verificó esta invocación")
     a.add_argument("--conservar-descripciones", action="store_true",
                    help="conservar descripciones de estudio y serie y protocolo, revisadas contra nombre e ID (keep descriptions)")
     a.set_defaults(func=cmd_limpiar)

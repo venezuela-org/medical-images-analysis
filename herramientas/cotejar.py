@@ -61,7 +61,7 @@ logging.getLogger("pydicom").setLevel(logging.CRITICAL)
 import pydicom  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
 
 def cargar_anonimizar():
@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mapa")
     p.add_argument("--reporte")
     p.add_argument("--json")
+    p.add_argument("--solo-lista", help="JSON con 'archivos': rutas limpias (relativas a la copia limpia, con '/') que forman el "
+                                        "conjunto a cotejar. El cotejo es igual de estricto, pero sobre ese conjunto exacto.")
     args = p.parse_args(argv)
     anon = cargar_anonimizar()
 
@@ -106,6 +108,16 @@ def main(argv: list[str] | None = None) -> int:
     conservar = bool(reporte.get("conservar_descripciones", False))
     cuarentena = {c["archivo"]: c["motivo"] for c in reporte.get("cuarentena", [])}
     omitidos_reporte = sum(reporte.get("archivos_omitidos", {}).values())
+
+    # Conjunto exacto (opcional): cada original aceptado debe llegar a un archivo de la lista, cada archivo de la lista
+    # debe venir de un original presente y coincidir byte a byte. Lo que haya fuera de la lista no se examina.
+    conjunto: set[Path] | None = None
+    if args.solo_lista:
+        try:
+            conjunto = {limpio / Path(*str(r).split("/")) for r in json.loads(Path(args.solo_lista).read_text(encoding="utf-8"))["archivos"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            print("No se pudo leer la lista del conjunto a cotejar (cannot read the file list)")
+            return 2
 
     conteo = Counter()
     problemas: list[str] = []
@@ -165,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
                 conteo["PROBLEMA: sin recalcular ni registro"] += 1
             continue
         esperados.add(esperado)
+        if conjunto is not None and esperado not in conjunto:
+            conteo["PROBLEMA: original cuyo archivo limpio no está en el conjunto"] += 1
+            problemas.append(f"un original aceptado corresponde a un archivo limpio que no pertenece al conjunto cotejado / outside the set ({clave_c})")
+            continue
         if not esperado.exists():
             if clave_c in cuarentena:
                 conteo["en cuarentena con registro"] += 1
@@ -185,15 +201,25 @@ def main(argv: list[str] | None = None) -> int:
     # Solo las carpetas de serie a las que este caso debía llegar; otros casos del mismo mapa no son sobrantes
     carpetas_caso = {e.parent for e in esperados}
     existentes = {p for c in carpetas_caso if c.is_dir() for p in anon.iter_archivos(c) if p.suffix.lower() == ".dcm"}
-    sobrantes = existentes - esperados
-    if sobrantes:
-        conteo["PROBLEMA: archivos limpios sin original"] = len(sobrantes)
-        problemas.append(f"{len(sobrantes)} archivo(s) limpio(s) sin original que los explique / clean files without an original")
+    if conjunto is None:
+        sobrantes = existentes - esperados                     # cotejo general: toda la serie debe explicarse por los originales
+        if sobrantes:
+            conteo["PROBLEMA: archivos limpios sin original"] = len(sobrantes)
+            problemas.append(f"{len(sobrantes)} archivo(s) limpio(s) sin original que los explique / clean files without an original")
+    else:
+        sin_original = conjunto - esperados                    # cotejo de un conjunto: cada archivo del conjunto debe tener su original
+        if sin_original:
+            conteo["PROBLEMA: archivos del conjunto sin original"] = len(sin_original)
+            problemas.append(f"{len(sin_original)} archivo(s) del conjunto sin original que los explique / listed clean files without an original")
+        fuera = existentes - conjunto
+        if fuera:
+            conteo["fuera del conjunto, sin examinar"] = len(fuera)
     omitidos_aqui = conteo["omitidos (no DICOM)"] + conteo["omitidos (DICOMDIR)"]
     if reporte and omitidos_aqui != omitidos_reporte:
         problemas.append(f"omitidos: {omitidos_aqui} aquí frente a {omitidos_reporte} en el reporte / skipped counts differ")
 
-    print(f"cotejar {VERSION} (política {anon.POLITICA}); seudónimos del caso: {', '.join(sorted(seudonimos)) or '-'}")
+    print(f"cotejar {VERSION} (política {anon.POLITICA}); seudónimos del caso: {', '.join(sorted(seudonimos)) or '-'}"
+          + (f"; conjunto exacto de {len(conjunto)} archivo(s)" if conjunto is not None else ""))
     for k, v in sorted(conteo.items()):
         print(f"  {k}: {v}")
     for m, n in motivos_cuarentena.items():
@@ -205,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps({"version": VERSION, "seudonimos": sorted(seudonimos), "conteo": dict(conteo),
                                                "cuarentena": dict(motivos_cuarentena), "problemas": problemas,
+                                               "conjunto": len(conjunto) if conjunto is not None else None,
                                                "veredicto": veredicto}, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if not problemas else 1
 

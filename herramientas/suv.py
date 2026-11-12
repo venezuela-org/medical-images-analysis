@@ -57,7 +57,7 @@ import pydicom  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True
 
-VERSION = "0.2.3"
+VERSION = "0.2.5"
 PET_CLASICO = "1.2.840.10008.5.1.4.1.1.128"
 PET_ENHANCED = "1.2.840.10008.5.1.4.1.1.130"
 UMBRAL_MBQ = 1e4          # dosis < 1e4 → almacenada en MBq
@@ -583,6 +583,22 @@ def cmd_comparar(args) -> int:
 
     # 1. inventario limpio → originales por el índice
     limpios_en_carpeta = sorted(p.resolve() for p in serie.iterdir() if p.is_file() and p.suffix.lower() == ".dcm")
+    solo_conjunto = False
+    if getattr(args, "solo_lista", None):
+        # Conjunto exacto: la comparación se limita a estos archivos limpios de la serie. Todo lo demás es igual de estricto.
+        try:
+            base = (limpios or serie.parent.parent.parent).resolve()
+            conjunto = {(base / Path(*str(r).split("/"))).resolve() for r in json.loads(Path(args.solo_lista).read_text(encoding="utf-8"))["archivos"]}
+        except (OSError, ValueError, KeyError, TypeError):
+            print("No se pudo leer la lista del conjunto a comparar (cannot read the file list)")
+            return 2
+        fuera = [c for c in limpios_en_carpeta if c not in conjunto]
+        limpios_en_carpeta = [c for c in limpios_en_carpeta if c in conjunto]
+        solo_conjunto = True
+        print(f"conjunto exacto: {len(limpios_en_carpeta)} archivo(s) de esta serie; {len(fuera)} fuera del conjunto, sin examinar")
+        if not limpios_en_carpeta:
+            print("Ningún archivo de la lista pertenece a esta serie (no listed file in this series)")
+            return 2
     limpio_a_original: dict[Path, Path] = {}
     sin_indice = 0
     for c in limpios_en_carpeta:
@@ -614,7 +630,11 @@ def cmd_comparar(args) -> int:
     if len(uids_serie) > 1:
         problemas.append(f"los originales emparejados pertenecen a {len(uids_serie)} series distintas")
     serie_original: list[Path] = []
-    if len(uids_serie) == 1:
+    if len(uids_serie) == 1 and solo_conjunto:
+        # Conjunto exacto: el lado original es, también, exacto. Son los originales de los archivos de la lista y ninguno
+        # más; un original de la misma serie que no entró en el conjunto (por ejemplo, uno en cuarentena) no es un faltante.
+        serie_original = sorted(o.resolve() for o in original_a_limpios if o.is_file())
+    elif len(uids_serie) == 1:
         uid = next(iter(uids_serie))
         for carpeta in sorted({o.parent for o in original_a_limpios if o.is_file()}):
             for f in sorted(p for p in carpeta.iterdir() if p.is_file()):
@@ -778,6 +798,7 @@ def main(argv=None) -> int:
     k.add_argument("serie", help="serie PET limpia (clean PET series folder under limpios/)")
     k.add_argument("--privado", help="carpeta privada con el índice (private folder with the index)")
     k.add_argument("--json")
+    k.add_argument("--solo-lista", help="JSON con 'archivos': rutas limpias (relativas a limpios/, con '/') a las que se limita la comparación")
     k.set_defaults(func=cmd_comparar)
     args = p.parse_args(argv)
     return args.func(args)

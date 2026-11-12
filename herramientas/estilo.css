@@ -112,6 +112,19 @@ pre.salida { background: var(--panel-2); border: 1px solid var(--borde); border-
 .insignia.error { background: var(--error-suave); border-color: var(--error); color: var(--error); }
 .insignia.info { background: var(--info-suave); border-color: var(--info); color: var(--info); }
 
+/* Pasos de un proceso: nombre, estado con texto y resumen */
+.pasos { display: flex; flex-direction: column; gap: var(--e-1); margin: var(--e-3) 0; }
+.pasos .paso-fila { display: grid; grid-template-columns: 210px 120px minmax(0, 1fr); gap: var(--e-3); align-items: center; padding: var(--e-2) var(--e-3); border: 1px solid var(--borde); border-radius: var(--radio-s); font-size: var(--t-s); }
+.pasos .paso-nombre { font-weight: 600; }
+.pasos .insignia { justify-self: start; }
+.etiqueta-estudio { font-size: var(--t-l); font-weight: 600; margin: 0 0 var(--e-2) 0; }
+.etiqueta-estudio:empty { display: none; }
+button.reintentar { padding: var(--e-1) var(--e-3); font-size: var(--t-s); margin-left: var(--e-2); }
+#rap-cuadros { margin-top: var(--e-2); }
+#rap-cuadros label { display: block; }
+.visor-corrida { display: grid; grid-template-columns: minmax(280px, 460px) minmax(240px, 1fr); gap: var(--e-5); margin-top: var(--e-3); align-items: start; }
+.pasos .paso-resumen { color: var(--tinta-2); overflow-wrap: anywhere; }
+
 /* ---------- 6. Tablas ---------- */
 table.datos { border-collapse: collapse; width: 100%; font-size: var(--t-s); }
 table.datos th { text-align: left; font-weight: 500; color: var(--tinta-2); background: var(--panel-2); padding: var(--e-2) var(--e-3); border-bottom: 1px solid var(--borde-fuerte); position: sticky; top: 0; }
