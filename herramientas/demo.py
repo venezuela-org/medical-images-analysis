@@ -56,7 +56,7 @@ def base(sop: str, modalidad: str, estudio: str, serie: str, marco: str, numero:
     ds.PatientID = "DEMO-000123"
     ds.IssuerOfPatientID = "HOSPITAL DEMO"
     ds.PatientBirthDate = "19600615"
-    ds.PatientSex, ds.PatientAge = "O", "064Y"
+    ds.PatientSex, ds.PatientAge = "O", "063Y"   # 63 años cumplidos en la fecha del estudio
     ds.PatientWeight, ds.PatientSize = "72", "1.70"
     ds.InstitutionName, ds.OperatorsName, ds.ReferringPhysicianName = "Hospital Demo", "OPERADOR^DEMO", "MEDICO^DEMO"
     ds.StudyDate = ds.SeriesDate = ds.AcquisitionDate = ds.ContentDate = "20240305"

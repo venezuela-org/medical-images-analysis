@@ -1,0 +1,211 @@
+"""
+Modo rápido, de extremo a extremo por la API, con la aplicación arrancada desde el código fuente y casos sintéticos.
+Express mode, end to end through the API, with synthetic cases.
+
+Cubre lo que la revisión del 11 de noviembre de 2026 pidió comprobar: el zip contiene exactamente los archivos de la
+carpeta elegida; nace siempre con la revisión pendiente y dentro de la carpeta de trabajo; el sello de revisión se
+aplica al conjunto congelado de la corrida y se rechaza si algo cambió; una corrida repetida sobre un caso ya revisado
+vuelve a salir pendiente; el manifiesto del zip rehecho dice lo que debe.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from pathlib import Path
+
+import pydicom
+import pytest
+
+RAIZ = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("demo", RAIZ / "herramientas" / "demo.py")
+demo = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(demo)
+
+
+class Servidor:
+    def __init__(self, trabajo: Path):
+        self.trabajo = trabajo
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            self.puerto = s.getsockname()[1]
+        self.log = open(trabajo.parent / "servidor.log", "w", encoding="utf-8")
+        self.proc = subprocess.Popen([sys.executable, str(RAIZ / "herramientas" / "app.py"), "--trabajo", str(trabajo),
+                                      "--puerto", str(self.puerto), "--sin-navegador"], stdout=self.log, stderr=subprocess.STDOUT)
+        for _ in range(240):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.puerto}/static/app.js", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.25)
+        texto = (trabajo.parent / "servidor.log").read_text(encoding="utf-8", errors="replace")
+        self.token = re.search(r"t=([A-Za-z0-9_-]+)", texto).group(1)
+
+    def api(self, ruta: str, cuerpo: dict | None = None):
+        datos = json.dumps(cuerpo).encode() if cuerpo is not None else None
+        req = urllib.request.Request(f"http://127.0.0.1:{self.puerto}/api/{ruta}", data=datos,
+                                     headers={"X-Token": self.token, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return r.status, json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode() or "{}")
+
+    def rapido(self, origen: Path, destino: Path | None = None) -> dict:
+        estado, r = self.api("rapido", {"origen": str(origen), "destino": str(destino) if destino else ""})
+        assert estado == 200, r
+        for _ in range(240):
+            _, t = self.api(f"trabajo/{r['trabajo']}")
+            if t["estado"] != "corriendo":
+                break
+            time.sleep(0.5)
+        t["id"] = r["trabajo"]
+        return t
+
+    def cerrar(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.log.close()
+
+
+@pytest.fixture
+def srv(tmp_path):
+    trabajo = tmp_path / "datos-pet"
+    trabajo.mkdir()
+    s = Servidor(trabajo)
+    yield s
+    s.cerrar()
+
+
+def caso(tmp_path: Path, nombre: str, semilla: int = 1) -> Path:
+    d = tmp_path / "estudios" / nombre
+    demo.escribir_caso(d, 4, semilla)
+    return d
+
+
+def nombres_zip(ruta: str) -> set[str]:
+    with zipfile.ZipFile(ruta) as z:
+        return set(z.namelist()) - {"manifiesto.json"}
+
+
+def manifiesto(ruta: str) -> dict:
+    with zipfile.ZipFile(ruta) as z:
+        return json.loads(z.read("manifiesto.json"))
+
+
+def test_el_zip_nace_pendiente_y_en_la_carpeta_de_trabajo(srv, tmp_path):
+    destino = tmp_path / "Dropbox" / "compartido"     # un destino que parece sincronizado con la nube
+    destino.mkdir(parents=True)
+    t = srv.rapido(caso(tmp_path, "A"), destino)
+    assert t["estado"] in ("ok", "con avisos") and t["zip"]
+    assert Path(t["zip"]).parent == srv.trabajo / "paquetes"          # pendiente: se queda en local
+    assert list(destino.iterdir()) == []                              # nada llegó al destino sin revisar
+    assert t["revision_pixeles_pendiente"] and t["destino_sincronizado"]
+    m = manifiesto(t["zip"])
+    assert m["revision_pixeles"]["estado"] == "pendiente" and m["revision_pixeles_pendiente"] == t["pacientes"]
+
+
+def test_sello_escribe_en_el_destino_el_mismo_conjunto_y_elimina_el_pendiente(srv, tmp_path):
+    destino = tmp_path / "salida"
+    destino.mkdir()
+    t = srv.rapido(caso(tmp_path, "A"), destino)
+    pendiente, contenido = t["zip"], nombres_zip(t["zip"])
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": ""})
+    assert estado == 400
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 200, r
+    assert Path(r["zip"]).parent == destino and nombres_zip(r["zip"]) == contenido
+    assert r["revision_pixeles_pendiente"] == [] and r["pendiente_anterior_no_eliminado"] == []
+    assert not Path(pendiente).exists()
+    m = manifiesto(r["zip"])
+    assert m["revision_pixeles"]["estado"] == "sin_hallazgos" and m["revision_pixeles"]["revisor"] == "Prueba"
+    assert m["revision_pixeles_pendiente"] == [] and {e["ruta"] for e in m["archivos"]} == contenido
+    estado, _ = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 409                                              # el sello no se aplica dos veces
+
+
+def test_solo_entran_los_archivos_de_la_carpeta_elegida(srv, tmp_path):
+    """El mismo paciente con dos estudios importados desde carpetas distintas: el zip del segundo no lleva el primero,
+    y el sello de esa corrida no deja 'revisado' al paciente completo."""
+    a, b = caso(tmp_path, "A", 1), caso(tmp_path, "B", 2)            # misma identidad sintética, estudios distintos
+    ta = srv.rapido(a)
+    tb = srv.rapido(b)
+    assert ta["pacientes"] == tb["pacientes"]                         # mismo seudónimo
+    za, zb = nombres_zip(ta["zip"]), nombres_zip(tb["zip"])
+    assert len(za) == len(zb) == 8 and za.isdisjoint(zb)              # cada zip, solo su carpeta
+    assert tb["otros_archivos_del_paciente"] == {tb["pacientes"][0]: 8}
+    estado, r = srv.api("rapido/revision", {"trabajo": tb["id"], "revisor": "Prueba"})
+    assert estado == 200 and nombres_zip(r["zip"]) == zb
+    assert r["revision_de_paciente_actualizada"] == []                # la corrida no cubre todos los archivos del paciente
+    _, rev = srv.api(f"revision/{tb['pacientes'][0]}")
+    assert rev["lista_para_compartir"] is False
+
+
+def test_corrida_repetida_sobre_un_caso_revisado_vuelve_a_salir_pendiente(srv, tmp_path):
+    c = caso(tmp_path, "A")
+    t1 = srv.rapido(c)
+    estado, r = srv.api("rapido/revision", {"trabajo": t1["id"], "revisor": "Prueba"})
+    assert estado == 200 and r["revision_de_paciente_actualizada"] == t1["pacientes"]   # aquí sí cubre al paciente entero
+    t2 = srv.rapido(c)
+    assert t2["revision_pixeles_pendiente"] == t2["pacientes"]        # la corrida nueva nace pendiente igualmente
+    assert manifiesto(t2["zip"])["revision_pixeles"]["estado"] == "pendiente"
+
+
+def test_el_sello_se_rechaza_si_un_archivo_cambio_desde_la_corrida(srv, tmp_path):
+    t = srv.rapido(caso(tmp_path, "A"))
+    limpio = next((srv.trabajo / "limpios").rglob("*.dcm"))
+    ds = pydicom.dcmread(limpio)
+    ds.PatientSex = "M"
+    ds.save_as(limpio, enforce_file_format=True)
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 409 and "cambiaron" in r["detail"]
+    assert Path(t["zip"]).exists()                                    # el pendiente sigue donde estaba, sin sello
+
+
+def test_suv_no_calculable_es_aviso_y_no_discrepancia(srv, tmp_path):
+    c = caso(tmp_path, "A")
+    for f in (c / "SE1").iterdir():                                   # sin peso del paciente no hay SUV
+        ds = pydicom.dcmread(f)
+        del ds.PatientWeight
+        ds.save_as(f, enforce_file_format=True)
+    t = srv.rapido(c)
+    suv = next(p for p in t["pasos"] if p["clave"] == "suv")
+    assert suv["estado"] == "aviso" and "no se puede calcular" in suv["resumen"] and "DISCREPANCIA" not in suv["resumen"]
+    assert t["zip"] and t["estado"] == "con avisos"                   # informa, no bloquea
+
+
+def test_misma_carpeta_con_una_serie_retirada_solo_empaqueta_lo_que_queda(srv, tmp_path):
+    """Regresión de la revisión del 11 de noviembre: tras importar CT + PET, se retiran los CT de la carpeta de entrada
+    y se repite el modo rápido sobre esa misma carpeta. El índice histórico recuerda los CT; la corrida no los incluye."""
+    c = caso(tmp_path, "A")
+    t1 = srv.rapido(c)
+    assert len(nombres_zip(t1["zip"])) == 8
+    for f in (c / "SE0").iterdir():                                   # se van los cuatro CT originales
+        f.unlink()
+    t2 = srv.rapido(c)
+    assert t2["estado"] in ("ok", "con avisos"), t2["mensaje"]
+    contenido = nombres_zip(t2["zip"])
+    assert len(contenido) == 4 and all("_PT_" in n for n in contenido)      # solo los PET que siguen en la carpeta
+    cotejo = next(p for p in t2["pasos"] if p["clave"] == "cotejo")
+    assert "coinciden byte a byte: 4" in cotejo["resumen"]
+    assert {e["ruta"] for e in manifiesto(t2["zip"])["archivos"]} == contenido
+    assert t2["otros_archivos_del_paciente"] == {t2["pacientes"][0]: 4}     # los CT guardados quedan fuera y se dice
+
+
+def test_empaquetado_clasico_por_la_api_exporta_cortes_numerados(srv, tmp_path):
+    t = srv.rapido(caso(tmp_path, "A"))
+    estado, r = srv.api("empaquetar", {"pacientes": t["pacientes"]})
+    assert estado == 200 and r["orden_sin_verificar"] == [] and "exportacion" not in r and "hashes" not in r
+    nombres = sorted(nombres_zip(r["ruta"]))
+    assert len(nombres) == 8 and all(n.rsplit("/", 1)[1].startswith("corte_00000") for n in nombres)
+    assert {e["ruta"] for e in manifiesto(r["ruta"])["archivos"]} == set(nombres) == nombres_zip(t["zip"])

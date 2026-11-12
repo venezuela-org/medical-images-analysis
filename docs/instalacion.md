@@ -16,6 +16,16 @@ La carpeta de datos se crea en `datos-pet` dentro de tu carpeta de usuario. Los 
 
 En la pestaña Entrada, pulsa "Crear caso de demostración": crea un CT y un PET inventados con identidad ficticia. Pulsa Anonimizar y recorre el resto: Estudios (ver cortes, Antes y después, Emparejar, Cotejar, SUV, Comparar SUV) y Enviar.
 
+## Cómo se identifica cada estudio
+
+Cada estudio aparece con una etiqueta como `ANON-0001 · F · 54 años en el estudio`: el identificador anónimo del paciente, el sexo tal como consta en el estudio y la edad que tenía el día del estudio. El identificador es siempre el mismo para un paciente; la edad cambia de un estudio a otro. Los estudios que ya estaban importados muestran el sexo, y la edad calculada aparece al volver a importar su carpeta original. Detalle en `docs/demografia.md`.
+
+## Modo rápido
+
+Cuando ya conoces el recorrido, la pestaña **Rápido** lo hace entero con un botón: elige la carpeta del estudio, elige dónde guardar el zip y pulsa "Anonimizar carpeta". La pantalla muestra los seis pasos con su resultado. El zip contiene solo los archivos de esa carpeta, nace con la revisión de píxeles pendiente y se queda en `datos-pet/paquetes`; después de recorrer todos los cortes en el visor que aparece bajo los pasos, que muestra exactamente los archivos de ese zip en su orden, escribe tu nombre y pulsa "Revisé todos los cortes: sin hallazgos": el zip revisado se escribe entonces en el destino que elegiste.
+
+Dentro del zip, los archivos de cada serie se llaman `corte_000001_….dcm`, `corte_000002_….dcm`, en el orden de los cortes: al descomprimirlo, el Explorador y el Finder los muestran como en el estudio original. Lo mismo vale para los paquetes de la pestaña Enviar. El criterio de orden está en `docs/orden-de-cortes.md`.
+
 ## Uso con estudios reales
 
 1. Entrada: "Elegir carpeta…" hasta la carpeta del caso, Anonimizar. Lee el reporte: archivos limpios, cuarentena, comprobación PET.

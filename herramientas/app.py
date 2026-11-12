@@ -30,6 +30,7 @@ Requiere anonimizar.py (misma versión) en la misma carpeta que app.py.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -37,6 +38,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 
@@ -57,7 +59,7 @@ warnings.simplefilter("ignore")
 import numpy as np  # noqa: E402
 import pydicom  # noqa: E402
 import uvicorn  # noqa: E402
-from fastapi import APIRouter, FastAPI, HTTPException, Request  # noqa: E402
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -87,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.7.5"
+VERSION = "0.9.3"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -121,21 +123,29 @@ def en_sincronizada(ruta: Path) -> str | None:
     return next((m for m in SYNC_MARCAS if m in s), None)
 
 
-def dialogo_carpeta() -> str | None:
-    """Selector nativo con título fijo (sin interpolar texto en AppleScript o PowerShell)."""
+TITULOS_DIALOGO = {"origen": "Carpeta con los DICOM originales", "destino": "Carpeta donde guardar el zip"}
+
+
+def dialogo_carpeta(para: str = "origen") -> str | None:
+    """Selector nativo. El título sale de una lista fija de dos textos; nunca se interpola texto de la petición."""
+    titulo = TITULOS_DIALOGO["destino" if para == "destino" else "origen"]
     try:
         if sys.platform == "darwin":
-            r = subprocess.run(["osascript", "-e", 'POSIX path of (choose folder with prompt "Carpeta con los DICOM originales")'],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+            guion = ('POSIX path of (choose folder with prompt "Carpeta con los DICOM originales")' if titulo == TITULOS_DIALOGO["origen"]
+                     else 'POSIX path of (choose folder with prompt "Carpeta donde guardar el zip")')
+            r = subprocess.run(["osascript", "-e", guion], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             return (r.stdout.strip() or None) if r.returncode == 0 else None
         if sys.platform.startswith("win"):
             # La ruta elegida puede llevar acentos (C:\\Users\\José\\...): PowerShell la escribe en UTF-8 y aquí se lee como UTF-8
+            descripcion = ("$d.Description = 'Carpeta con los DICOM originales'; " if titulo == TITULOS_DIALOGO["origen"]
+                           else "$d.Description = 'Carpeta donde guardar el zip'; ")
             ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; "
-                  "$d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Carpeta con los DICOM originales'; "
+                  "$d = New-Object System.Windows.Forms.FolderBrowserDialog; " + descripcion +
                   "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }")
             r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
             return r.stdout.strip() or None
-        r = subprocess.run(["zenity", "--file-selection", "--directory", "--title=Carpeta con los DICOM originales"],
+        argumento = "--title=Carpeta con los DICOM originales" if titulo == TITULOS_DIALOGO["origen"] else "--title=Carpeta donde guardar el zip"
+        r = subprocess.run(["zenity", "--file-selection", "--directory", argumento],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         return r.stdout.strip() or None
     except (OSError, subprocess.TimeoutExpired):
@@ -225,25 +235,175 @@ def archivos_regulares(carpeta: Path):
 # índice / index
 # --------------------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------------------
+# orden de los cortes de una serie: un solo criterio para el visor y para la exportación
+# --------------------------------------------------------------------------------------
+# 1. InstanceNumber, cuando todos los archivos de la serie lo tienen, es un entero válido y no se repite.
+# 2. Si no, posición y orientación, solo cuando describen una pila coherente: todos los archivos con
+#    ImagePositionPatient e ImageOrientationPatient, una sola orientación, posiciones distintas a lo largo de la
+#    normal del plano y ninguna señal de varias fases temporales. Orden creciente a lo largo de la normal.
+# 3. Si no, un desempate determinista (número de instancia si lo hay, posición si la hay, nombre interno) y un
+#    aviso: ese orden NO es un orden anatómico verificado.
+# El resultado es un índice de presentación. No se escribe en ningún atributo DICOM.
+
+CRITERIO_NUMERO, CRITERIO_POSICION, CRITERIO_DESEMPATE = "InstanceNumber", "posición y orientación", "desempate determinista"
+ETIQUETAS_ORDEN = ["InstanceNumber", "ImagePositionPatient", "ImageOrientationPatient", "TemporalPositionIdentifier",
+                   "NumberOfTemporalPositions", "NumberOfTimeSlices", "Modality", "Rows", "Columns", "SeriesDescription",
+                   "ProtocolName", "PixelSpacing", "SliceThickness", "PatientIdentityRemoved", "DeidentificationMethod",
+                   "PatientSex", "PatientAge"]
+
+
+def _entero_valido(v) -> int | None:
+    try:
+        t = str(v).strip()
+        return int(t) if t != "" and v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def datos_de_orden(ds) -> dict:
+    """Lo que hace falta de una cabecera para ordenar su archivo dentro de la serie."""
+    def flotantes(nombre: str, n: int):
+        try:
+            v = [float(x) for x in ds.get(nombre, [])]
+            return v if len(v) == n and all(np.isfinite(v)) else None
+        except (TypeError, ValueError):
+            return None
+    def mayor_que_uno(nombre: str) -> bool:
+        n = _entero_valido(ds.get(nombre, None))
+        return n is not None and n > 1
+    return {"numero": _entero_valido(ds.get("InstanceNumber", None)), "ipp": flotantes("ImagePositionPatient", 3),
+            "iop": flotantes("ImageOrientationPatient", 6), "fase": _entero_valido(ds.get("TemporalPositionIdentifier", None)),
+            "varias_fases": mayor_que_uno("NumberOfTemporalPositions") or mayor_que_uno("NumberOfTimeSlices")}
+
+
+def _proyecciones(items: list[dict]) -> list[float] | None:
+    """Posición de cada corte a lo largo de la normal, si los archivos forman una pila coherente; si no, None."""
+    if len(items) < 2 or any(i["ipp"] is None or i["iop"] is None for i in items):
+        return None
+    if any(i["varias_fases"] for i in items) or len({i["fase"] for i in items if i["fase"] is not None}) > 1:
+        return None                                   # varias fases temporales: la posición sola no ordena
+    iop0 = np.array(items[0]["iop"])
+    if any(np.abs(np.array(i["iop"]) - iop0).max() > 1e-3 for i in items):
+        return None                                   # más de una orientación
+    normal = np.cross(iop0[:3], iop0[3:])
+    if not np.isfinite(normal).all() or np.linalg.norm(normal) < 1e-6:
+        return None
+    proy = [float(np.dot(np.array(i["ipp"]), normal)) for i in items]
+    orden = sorted(proy)
+    if any(b - a < 1e-3 for a, b in zip(orden, orden[1:])):
+        return None                                   # posiciones repetidas: no es una pila única
+    return proy
+
+
+def ordenar_serie(archivos: list[Path], cabeceras: dict | None = None) -> dict:
+    """Ordena los archivos de UNA serie. Devuelve {'orden': [Path...], 'criterio': str, 'aviso': str | None}.
+    El resultado no depende del orden de entrada."""
+    items = []
+    for a in sorted(archivos, key=lambda x: x.name):
+        d = (cabeceras or {}).get(str(a))
+        if d is None:
+            try:
+                d = datos_de_orden(pydicom.dcmread(a, stop_before_pixels=True, specific_tags=ETIQUETAS_ORDEN))
+            except Exception:
+                d = {"numero": None, "ipp": None, "iop": None, "fase": None, "varias_fases": False}
+        items.append({**d, "ruta": a})
+    numeros = [i["numero"] for i in items]
+    if items and all(n is not None for n in numeros) and len(set(numeros)) == len(numeros):
+        return {"orden": [i["ruta"] for i in sorted(items, key=lambda i: i["numero"])], "criterio": CRITERIO_NUMERO, "aviso": None}
+    motivo = "InstanceNumber ausente en algún archivo" if any(n is None for n in numeros) else "InstanceNumber repetido"
+    proy = _proyecciones(items)
+    if proy is not None:
+        pares = sorted(zip(proy, range(len(items))))
+        return {"orden": [items[k]["ruta"] for _, k in pares], "criterio": CRITERIO_POSICION,
+                "aviso": f"{motivo}; cortes ordenados por posición a lo largo de la normal del plano"}
+    def clave(i: dict):
+        return (i["numero"] is None, i["numero"] or 0, i["fase"] is None, i["fase"] or 0, i["ruta"].name)
+    return {"orden": [i["ruta"] for i in sorted(items, key=clave)], "criterio": CRITERIO_DESEMPATE,
+            "aviso": f"{motivo} y la posición no describe una pila única; el orden de los cortes es un desempate determinista, no un orden anatómico verificado"}
+
+
+def mapa_exportacion(rels: list[str]) -> tuple[dict[str, str], dict[str, dict]]:
+    """De rutas internas (relativas a limpios/, con '/') a rutas exportadas, serie por serie:
+    PAC/estudio/serie/corte_000001_<nombre interno>.dcm. La numeración es independiente en cada serie y se calcula
+    solo sobre los archivos recibidos. Devuelve también el criterio y el aviso de cada serie."""
+    limpios = (TRABAJO / "limpios").resolve()
+    por_serie: dict[str, list[str]] = {}
+    for rel in rels:
+        por_serie.setdefault(rel.rsplit("/", 1)[0], []).append(rel)
+    mapa, info = {}, {}
+    for serie in sorted(por_serie):
+        o = ordenar_serie([limpios / r for r in por_serie[serie]])
+        ancho = max(6, len(str(len(o["orden"]))))
+        for k, a in enumerate(o["orden"], 1):
+            mapa[f"{serie}/{a.name}"] = f"{serie}/corte_{k:0{ancho}d}_{a.stem}.dcm"
+        info[serie] = {"criterio": o["criterio"], "aviso": o["aviso"], "archivos": len(o["orden"])}
+    return mapa, info
+
+
+# --------------------------------------------------------------------------------------
+# demografía por estudio: identificador anónimo, sexo registrado y edad en la fecha del estudio
+# --------------------------------------------------------------------------------------
+# La limpieza calcula la edad antes de anonimizar las fechas y deja, por cada archivo limpio, lo que su original decía
+# de la edad y el sexo (limpios_PRIVADO/demografia.json: valores derivados, ninguna fecha). Aquí se resume por estudio,
+# siempre sobre un conjunto exacto de archivos: toda la serie guardada para Estudios, los archivos de la corrida para
+# el modo rápido, los archivos del paquete para el manifiesto.
+
+def registro_demografia() -> dict:
+    try:
+        return json.loads((carpeta_privada() / "demografia.json").read_text(encoding="utf-8")).get("archivos", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def demografia_de(rels: list[str], de_los_limpios: dict[str, dict] | None = None, registro: dict | None = None) -> list[dict]:
+    """Un resumen por estudio (paciente/estudio) de los archivos recibidos, y solo de ellos. Para los archivos sin
+    registro (importados con una versión anterior) se usa lo que conserva el propio archivo limpio: el sexo y, si
+    existe, la edad informada por el equipo; la edad calculada no se puede obtener sin volver a importar."""
+    registro = registro_demografia() if registro is None else registro
+    limpios = (TRABAJO / "limpios").resolve()
+    por_estudio: dict[str, list[dict]] = {}
+    for rel in rels:
+        obs = registro.get(rel) or (de_los_limpios or {}).get(rel)
+        if obs is None:
+            try:
+                obs = ANON.observacion_de_archivo_limpio(pydicom.dcmread(limpios / rel, stop_before_pixels=True, specific_tags=["PatientSex", "PatientAge"]))
+            except Exception:
+                obs = {"e": ["n", "archivo ilegible"], "i": None, "s": ""}
+        por_estudio.setdefault("/".join(rel.split("/")[:2]), []).append(obs)
+    out = []
+    for clave in sorted(por_estudio):
+        paciente, estudio = clave.split("/")
+        resumen = ANON.resumen_demografia(por_estudio[clave])
+        out.append({"paciente": paciente, "estudio": estudio, "etiqueta": ANON.etiqueta_demografia(paciente, resumen), **resumen})
+    return out
+
+
 def indexar() -> None:
     INDICE.clear()
     limpios = TRABAJO / "limpios"
     if not limpios.is_dir():
         return
+    de_los_limpios: dict[str, dict] = {}          # ruta limpia → sexo y edad informada que conserva el propio archivo
+    rels_por_estudio: dict[str, list[str]] = {}
+    limpios_abs = limpios.resolve()
     for carpeta_serie in sorted(p for p in limpios.glob("*/*/*") if p.is_dir() and not p.is_symlink()):
         if not PACIENTE_RE.match(carpeta_serie.parts[-3]):
             continue
         archivos = sorted(p for p in carpeta_serie.iterdir() if p.suffix.lower() == ".dcm" and not p.is_symlink())
         if not archivos:
             continue
-        cortes, meta = [], {}
+        cabeceras, legibles, meta = {}, [], {}
         for a in archivos:
             try:
-                ds = pydicom.dcmread(a, stop_before_pixels=True)
+                ds = pydicom.dcmread(a, stop_before_pixels=True, specific_tags=ETIQUETAS_ORDEN)
             except Exception:
                 continue
-            n = ds.get("InstanceNumber", None)
-            cortes.append((int(n) if n not in (None, "") else len(cortes), str(a)))
+            cabeceras[str(a)] = datos_de_orden(ds)
+            legibles.append(a)
+            rel_a = a.resolve().relative_to(limpios_abs).as_posix()
+            de_los_limpios[rel_a] = ANON.observacion_de_archivo_limpio(ds)
+            rels_por_estudio.setdefault("/".join(rel_a.split("/")[:2]), []).append(rel_a)
             if not meta:
                 meta = {"modalidad": str(ds.get("Modality", "")), "filas": int(ds.get("Rows", 0) or 0),
                         "descripcion": str(ds.get("SeriesDescription", "")), "protocolo": str(ds.get("ProtocolName", "")),
@@ -252,16 +412,32 @@ def indexar() -> None:
                         "grosor": float(ds.SliceThickness) if "SliceThickness" in ds and str(ds.SliceThickness) else None,
                         "identidad_removida": str(ds.get("PatientIdentityRemoved", "")),
                         "politica": str(ds.get("DeidentificationMethod", "")).split(";")[0]}
-        cortes.sort()
+        if not legibles:
+            continue
+        o = ordenar_serie(legibles, cabeceras)                       # el mismo orden que usará la exportación
+        cortes = [(k, str(a)) for k, a in enumerate(o["orden"], 1)]
+        meta["orden_criterio"], meta["orden_aviso"] = o["criterio"], o["aviso"]
         rel = carpeta_serie.relative_to(limpios)
         sid = hashlib.sha1(str(rel).encode()).hexdigest()[:12]
         INDICE[sid] = {"id": sid, "paciente": rel.parts[0], "estudio": rel.parts[1], "serie": rel.parts[2],
                        "n": len(cortes), "cortes": cortes, **meta}
+    # demografía de cada estudio guardado, sobre todos sus archivos; cada serie lleva la de su estudio
+    registro = registro_demografia()
+    por_estudio = {f"{d['paciente']}/{d['estudio']}": d for rels in rels_por_estudio.values() for d in demografia_de(rels, de_los_limpios, registro)}
+    for s_ in INDICE.values():
+        d = por_estudio.get(f"{s_['paciente']}/{s_['estudio']}")
+        s_["demografia"], s_["etiqueta"] = d, (d or {}).get("etiqueta", s_["paciente"])
     registrar(f"índice: {len(INDICE)} series")
 
 
 def render_corte(ruta: str, ventana: str) -> bytes:
-    ds = pydicom.dcmread(ruta)
+    """PNG de un corte leído de disco. Para mostrar bytes ya verificados, usar render_bytes() con esos mismos bytes."""
+    return render_bytes(Path(ruta).read_bytes(), ventana)
+
+
+def render_bytes(datos: bytes, ventana: str) -> bytes:
+    """PNG de un corte a partir de los bytes exactos de su archivo DICOM. No abre ninguna ruta."""
+    ds = pydicom.dcmread(io.BytesIO(datos))
     arr = ds.pixel_array.astype(np.float32)
     arr = arr * float(ds.get("RescaleSlope", 1) or 1) + float(ds.get("RescaleIntercept", 0) or 0)
     if ventana == "auto" or str(ds.get("Modality", "")) == "PT":
@@ -314,9 +490,9 @@ def estado(request: Request):
 
 
 @api.post("/elegir-carpeta")
-def elegir_carpeta(request: Request):
+def elegir_carpeta(request: Request, cuerpo: dict = Body(default={})):
     auth(request)
-    ruta = dialogo_carpeta()
+    ruta = dialogo_carpeta("destino" if str((cuerpo or {}).get("para", "")) == "destino" else "origen")
     if not ruta:
         return {"ruta": None, "mensaje": "No se pudo abrir el selector; escribe la ruta a mano"}
     return {"ruta": ruta, "sincronizada": en_sincronizada(Path(ruta))}
@@ -326,18 +502,9 @@ def elegir_carpeta(request: Request):
 def anonimizar(request: Request, cuerpo: dict):
     auth(request)
     origen = Path(str(cuerpo.get("origen", ""))).expanduser()
-    if not origen.is_dir():
-        raise HTTPException(400, "la carpeta de originales no existe / originals folder not found")
     if not CONGELADO and not ANONIMIZAR.exists():
         raise HTTPException(500, "falta anonimizar.py junto a app.py")
-    marca = en_sincronizada(TRABAJO)
-    if marca:
-        raise HTTPException(400, f"la carpeta de trabajo está dentro de una carpeta sincronizada ({marca}); elige otra")
-    o = origen.resolve()
-    for prohibida in (TRABAJO / "limpios", carpeta_privada(), carpeta_reportes(), TRABAJO / "paquetes"):
-        pr = prohibida.resolve()
-        if o == pr or o.is_relative_to(pr) or pr.is_relative_to(o):
-            raise HTTPException(400, "la carpeta de originales se solapa con la copia limpia, la privada, los reportes o los paquetes; elige otra")
+    validar_origen(origen)
     prefijo = str(cuerpo.get("prefijo", "")).strip() or prefijo_actual()
     if not re.fullmatch(r"[A-Z0-9]{2,12}", prefijo):
         raise HTTPException(400, "prefijo: de 2 a 12 letras mayúsculas o dígitos")
@@ -371,7 +538,7 @@ def trabajo(request: Request, tid: str):
         t["indexado"] = True
         rep = carpeta_reportes() / "ultimo_reporte.md"
         t["reporte"] = rep.read_text(encoding="utf-8") if rep.exists() else ""
-    return {k: v for k, v in t.items() if k != "indexado"}
+    return {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida")}
 
 
 @api.get("/estudios")
@@ -422,15 +589,71 @@ def verificar(request: Request, cuerpo: dict):
     return resultados
 
 
-@api.post("/empaquetar")
-def empaquetar(request: Request, cuerpo: dict):
-    auth(request)
-    pacientes = sorted({str(p) for p in cuerpo.get("pacientes", [])})
-    if not pacientes:
-        raise HTTPException(400, "elige al menos un paciente / pick at least one patient")
+def _escribir_json(ruta: Path, datos: dict) -> None:
+    """Escritura de un registro JSON en disco; un único punto para todas las evidencias (manifiestos y revisiones)."""
+    ruta.write_text(json.dumps(datos, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _eliminar(ruta: Path) -> bool:
+    """Borra un archivo; devuelve False si sigue existiendo."""
+    try:
+        Path(ruta).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return not Path(ruta).exists()
+
+
+SUFIJO_PREPARADO = ".preparada"   # evidencia escrita antes de publicar; sin confirmar no acredita ninguna publicación
+
+
+class PublicacionFallida(Exception):
+    """El zip no se publicó. `restos` son los archivos intermedios que no se pudieron retirar (rutas completas)."""
+
+    def __init__(self, codigo: int, mensaje: str, restos: list[str] | None = None):
+        super().__init__(mensaje)
+        self.codigo, self.mensaje, self.restos = codigo, mensaje, list(restos or [])
+
+
+def texto_restos(restos: list[str]) -> str:
+    if not restos:
+        return ""
+    return (" No se pudieron retirar estos archivos intermedios; bórralos a mano: " + ", ".join(restos) +
+            f". Los que terminan en {SUFIJO_PREPARADO} son evidencia preparada de una publicación que no ocurrió, no un registro de revisión.")
+
+
+class PaqueteRechazado(Exception):
+    """El paquete no se creó; lleva el código HTTP y el cuerpo que explican por qué."""
+
+    def __init__(self, codigo: int, cuerpo: dict):
+        super().__init__(str(cuerpo))
+        self.codigo, self.cuerpo = codigo, cuerpo
+
+
+def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpieza_en_curso_permitida: bool = False,
+                  solo: set[str] | None = None, revision_corrida: dict | None = None,
+                  hashes_esperados: dict[str, str] | None = None, antes_de_publicar=None,
+                  exportacion: dict[str, str] | None = None, orden_series: dict[str, dict] | None = None,
+                  demografia: list[dict] | None = None) -> dict:
+    """Verifica, hashea y empaqueta a partir de los mismos bytes; escribe el zip en destino_dir (por defecto, paquetes/).
+    Con `solo` (rutas relativas a limpios/, con '/') entra exactamente ese conjunto de archivos y ninguno más.
+    Con `revision_corrida` el manifiesto lleva el estado de revisión de esa corrida, no el del paciente completo.
+    Con `hashes_esperados` cada archivo se compara, sobre los mismos bytes que se van a empaquetar, con el hash
+    congelado; cualquier diferencia rechaza el paquete ANTES de escribir nada en ninguna parte.
+
+    Nombres: los archivos limpios conservan su nombre interno; en el zip y en su manifiesto cada uno aparece con su
+    ruta exportada, `PAC/estudio/serie/corte_000001_<nombre interno>.dcm`, según `exportacion` (ruta interna → ruta
+    exportada). Si no se pasa, se calcula aquí con mapa_exportacion() sobre los archivos que entran. Los bytes no cambian.
+
+    Orden de efectos, con la publicación como punto de compromiso:
+      1. leer, verificar y hashear cada archivo (nada escrito);
+      2. zip temporal en la carpeta de trabajo local, releído y comprobado;
+      3. evidencias locales: el manifiesto externo junto al temporal y, si se pasa, `antes_de_publicar(info)`
+         (por ejemplo, el registro de la revisión). Si cualquiera falla, nada se publica;
+      4. PUBLICACIÓN: el zip aparece con su nombre final en el destino (renombrado atómico);
+      5. limpieza posterior: lo que falle aquí son avisos en el resultado, nunca un error, y la ruta publicada se conserva."""
     carpetas = {pac: carpeta_paciente(pac) for pac in pacientes}   # valida cada identificador antes de tocar nada
-    if (TRABAJO / "limpios" / ".corriendo").exists():
-        raise HTTPException(409, "hay una limpieza en curso; espera a que termine / a cleaning run is in progress")
+    if not limpieza_en_curso_permitida and (TRABAJO / "limpios" / ".corriendo").exists():
+        raise PaqueteRechazado(409, {"detail": "hay una limpieza en curso; espera a que termine / a cleaning run is in progress"})
 
     # 1. cada archivo se lee UNA vez: esos bytes se verifican, se hashean y se escriben al zip
     #    each file is read ONCE: those same bytes are verified, hashed and written to the zip
@@ -447,6 +670,8 @@ def empaquetar(request: Request, cuerpo: dict):
             for n in sorted(nombres):
                 a = Path(raiz) / n
                 rel = a.relative_to(limpios).as_posix()   # el zip y el manifiesto usan '/', también en Windows
+                if solo is not None and rel not in solo:
+                    continue                              # fuera del conjunto exacto de esta corrida
                 if a.is_symlink():
                     fallos[rel] = ["enlace simbólico / symlink"]
                     continue
@@ -458,52 +683,567 @@ def empaquetar(request: Request, cuerpo: dict):
                 if problemas:
                     fallos[rel] = problemas
                     continue
-                entradas.append((rel, datos, hashlib.sha256(datos).hexdigest()))
+                h = hashlib.sha256(datos).hexdigest()
+                if hashes_esperados is not None and hashes_esperados.get(rel) != h:
+                    fallos[rel] = ["el archivo cambió desde la corrida que se revisó / changed since the reviewed run"]
+                    continue
+                entradas.append((rel, datos, h))
     if fallos:
         registrar(f"empaquetar: rechazado, {len(fallos)} archivo(s) con problemas en {', '.join(pacientes)}")
-        return JSONResponse(status_code=409, content={"error": "la compuerta falló; nada se empaquetó", "fallos": fallos})
+        raise PaqueteRechazado(409, {"error": "la compuerta falló; nada se empaquetó", "fallos": fallos})
     if not entradas:
-        raise HTTPException(409, "no hay archivos DICOM limpios en la selección / nothing to package")
+        raise PaqueteRechazado(409, {"detail": "no hay archivos DICOM limpios en la selección / nothing to package"})
+    if solo is not None and {rel for rel, _, _ in entradas} != set(solo):
+        faltan = sorted(set(solo) - {rel for rel, _, _ in entradas})
+        raise PaqueteRechazado(409, {"error": "faltan archivos del conjunto de la corrida; nada se empaquetó", "fallos": {f: ["ausente"] for f in faltan[:50]}})
+
+    # nombres exportados: correspondencia explícita, comprobada antes de escribir nada
+    internos = [rel for rel, _, _ in entradas]
+    if exportacion is None:
+        exportacion, orden_series = mapa_exportacion(internos)
+    else:
+        exportacion = dict(exportacion)                    # correspondencia fijada por quien llama (una corrida del modo rápido)
+        orden_series = dict(orden_series) if orden_series else None
+    exportados = [exportacion.get(rel) for rel in internos]
+    if set(exportacion) != set(internos) or None in exportados or len(set(exportados)) != len(exportados) \
+            or any(not e.endswith(".dcm") or e.split("/")[:-1] != rel.split("/")[:-1] for rel, e in zip(internos, exportados)):
+        raise PaqueteRechazado(409, {"detail": "la correspondencia de nombres exportados no coincide con los archivos del paquete; nada se empaquetó"})
+    if orden_series is None:
+        orden_series = {}
+        for rel in internos:
+            orden_series.setdefault(rel.rsplit("/", 1)[0], None)
+    entradas = sorted(((exportacion[rel], datos, h, rel) for rel, datos, h in entradas), key=lambda e: e[0])
+
+    # demografía por estudio: solo de los pacientes y estudios presentes en el paquete. Si viene fijada por una corrida,
+    # se usa tal cual; si no, se calcula ahora sobre los archivos que entran.
+    demografia = copy.deepcopy(demografia) if demografia is not None else demografia_de(internos)
+    if {(d["paciente"], d["estudio"]) for d in demografia} != {tuple(rel.split("/")[:2]) for rel in internos}:
+        raise PaqueteRechazado(409, {"detail": "la demografía no corresponde a los estudios del paquete; nada se empaquetó"})
 
     try:
         politica = json.loads((limpios / ".politica.json").read_text(encoding="utf-8")).get("politica", "")
     except (OSError, ValueError):
         politica = ""
-    revisiones = {pac: leer_revision(pac) for pac in pacientes}
-    pendientes = [pac for pac, r in revisiones.items() if not r.get("lista_para_compartir")]
+    if revision_corrida is not None:
+        # modo rápido: el estado de revisión es el de ESTA corrida y ESTOS archivos, nunca el del paciente completo
+        pendientes = [] if revision_corrida.get("estado") == "sin_hallazgos" else list(pacientes)
+        bloque_revision = {"alcance": "los archivos de este paquete (corrida del modo rápido)", **revision_corrida}
+        aviso_manifiesto = ("revisión de píxeles sin hallazgos en los archivos de este paquete" if not pendientes
+                            else "paquete creado localmente; la revisión de píxeles de los archivos de este paquete está pendiente")
+    else:
+        revisiones = {pac: leer_revision(pac) for pac in pacientes}
+        pendientes = [pac for pac, r in revisiones.items() if not r.get("lista_para_compartir")]
+        bloque_revision = {pac: {k: r.get(k) for k in ("estado", "vigente", "fecha", "hallazgos", "detalle")} for pac, r in revisiones.items()}
+        aviso_manifiesto = ("paquete creado localmente; la revisión de píxeles está pendiente para los pacientes listados" if pendientes
+                            else "revisión de píxeles vigente y sin hallazgos en todos los pacientes")
     manifiesto = {"version_app": VERSION, "politica": politica, "prefijo": prefijo,
                   "creado": dt.datetime.now().isoformat(timespec="seconds"), "pacientes": pacientes,
-                  "revision_pixeles": {pac: {k: r.get(k) for k in ("estado", "vigente", "fecha", "hallazgos", "detalle")} for pac, r in revisiones.items()},
+                  "revision_pixeles": bloque_revision,
                   "revision_pixeles_pendiente": pendientes,
-                  "aviso": "paquete creado localmente; la revisión de píxeles está pendiente para los pacientes listados" if pendientes else "revisión de píxeles vigente y sin hallazgos en todos los pacientes",
-                  "archivos": [{"ruta": rel, "sha256": h, "bytes": len(datos)} for rel, datos, h in entradas],
+                  "aviso": aviso_manifiesto,
+                  "archivos": [{"ruta": exp, "sha256": h, "bytes": len(datos)} for exp, datos, h, _ in entradas],
+                  "nombres": "corte_NNNNNN es un índice de presentación por serie; no modifica InstanceNumber ni ningún otro atributo DICOM",
+                  "demografia": {"nota": "Por estudio: identificador anónimo, sexo registrado en el DICOM (no se infiere) y edad en la fecha del "
+                                         "estudio, calculada antes de anonimizar las fechas. No se exportan la fecha de nacimiento ni la fecha "
+                                         "original del estudio. 90 años o más se agrupan, como en PatientAge.",
+                                 "estudios": demografia},
+                  "orden_de_cortes": {serie: ({"criterio": o["criterio"], "aviso": o["aviso"]} if o else {"criterio": "fijado en la corrida"})
+                                      for serie, o in sorted(orden_series.items())},
                   "verificacion": "cada archivo verificado a partir de los mismos bytes que se empaquetaron"}
 
-    # 2. zip temporal desde esos bytes, relectura y comparación de hashes, publicación atómica con nombre único
-    destino_dir = TRABAJO / "paquetes"
-    destino_dir.mkdir(parents=True, exist_ok=True)
+    # 2. zip temporal en la carpeta de trabajo local, desde esos bytes; relectura y comparación de hashes
+    destino_dir = Path(destino_dir) if destino_dir else TRABAJO / "paquetes"
+    local_dir = TRABAJO / "paquetes"
+    local_dir.mkdir(parents=True, exist_ok=True)
     nombre = f"paquete_{dt.datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(3)}.zip"
-    fd, tmp = tempfile.mkstemp(dir=destino_dir, prefix=".tmp_", suffix=".zip")
+    final = destino_dir / nombre
+    manifiesto_local = local_dir / (nombre[:-4] + ".manifiesto.json")
+    manifiesto_preparado = manifiesto_local.with_name(manifiesto_local.name + SUFIJO_PREPARADO)
+    fd, tmp = tempfile.mkstemp(dir=local_dir, prefix=".tmp_", suffix=".zip")
     os.close(fd)
+    tmp = Path(tmp)
+    parcial = None
+    es_local = destino_dir.resolve() == local_dir.resolve()
+    etapa = "la comprobación del paquete"
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-            for rel, datos, _ in entradas:
-                z.writestr(rel, datos)
+            for exp, datos, _, _ in entradas:
+                z.writestr(exp, datos)
             z.writestr("manifiesto.json", json.dumps(manifiesto, ensure_ascii=False, indent=2))
         with zipfile.ZipFile(tmp) as z:
-            nombres = set(z.namelist())
-            for rel, _, h in entradas:
-                if rel not in nombres or hashlib.sha256(z.read(rel)).hexdigest() != h:
-                    raise RuntimeError(rel)
-        os.replace(tmp, destino_dir / nombre)
+            nombres = z.namelist()
+            if sorted(nombres) != sorted([exp for exp, _, _, _ in entradas] + ["manifiesto.json"]):
+                raise RuntimeError("entradas del zip")
+            for exp, _, h, _ in entradas:
+                if hashlib.sha256(z.read(exp)).hexdigest() != h:
+                    raise RuntimeError(exp)
+        huella = sha256_archivo(tmp)
+
+        # 3. evidencias locales ANTES de publicar: manifiesto externo y lo que pida quien llama
+        etapa = "el guardado del manifiesto local"
+        _escribir_json(manifiesto_preparado, {**manifiesto, "zip": {"nombre": nombre, "destino": str(destino_dir), "sha256": huella},
+                                              "correspondencia_interna": {exp: rel for exp, _, _, rel in entradas}})
+        if antes_de_publicar is not None:
+            etapa = "el guardado del registro previo a la publicación"
+            antes_de_publicar({"nombre": nombre, "ruta": str(final), "sha256": huella, "manifiesto_local": str(manifiesto_local),
+                               "hashes": {rel: h for _, _, h, rel in entradas}})
+
+        # 4. PUBLICACIÓN (punto de compromiso): el zip aparece con su nombre final de una sola vez
+        etapa = "la copia al destino"
+        if es_local:
+            os.replace(tmp, final)
+        else:
+            destino_dir.mkdir(parents=True, exist_ok=True)
+            parcial = destino_dir / (".parcial_" + nombre)
+            shutil.copyfile(tmp, parcial)
+            if sha256_archivo(parcial) != huella:
+                raise RuntimeError("copia al destino")
+            os.replace(parcial, final)
     except Exception as e:
-        Path(tmp).unlink(missing_ok=True)
-        registrar(f"empaquetar: falló la comprobación del zip ({type(e).__name__}); nada publicado")
-        raise HTTPException(500, "la comprobación del paquete falló; no se publicó / package check failed")
-    (destino_dir / (nombre[:-4] + ".manifiesto.json")).write_text(json.dumps(manifiesto, ensure_ascii=False, indent=2), encoding="utf-8")
-    registrar(f"empaquetar: {nombre} con {len(entradas)} archivos de {', '.join(pacientes)}; revisión de píxeles pendiente: {', '.join(pendientes) or 'ninguno'}")
-    return {"ruta": str(destino_dir / nombre), "archivos": len(entradas), "pacientes": pacientes,
-            "revision_pixeles_pendiente": pendientes}
+        # nada se publicó: se retira todo lo intermedio, y lo que no se pueda retirar se devuelve con su ruta
+        restos = [str(resto) for resto in (tmp, parcial, manifiesto_preparado) if resto is not None and not _eliminar(resto)]
+        registrar(f"empaquetar: falló {etapa} ({type(e).__name__}); nada publicado" + (f"; sin retirar: {', '.join(restos)}" if restos else ""))
+        raise PaqueteRechazado(500, {"detail": f"falló {etapa}; el zip no se publicó / package not published", "restos": restos})
+
+    # 5. después de publicar ya no hay errores, solo avisos: la ruta publicada se conserva pase lo que pase
+    avisos = []
+    try:
+        os.replace(manifiesto_preparado, manifiesto_local)      # la evidencia preparada pasa a confirmada
+    except OSError:
+        manifiesto_local = manifiesto_preparado
+        avisos.append(f"el manifiesto local quedó con su nombre provisional aunque el zip está publicado: {manifiesto_preparado}")
+    if not es_local and not _eliminar(tmp):
+        avisos.append(f"no se pudo eliminar el zip temporal de la carpeta de trabajo: {tmp}")
+    registrar(f"empaquetar: {nombre} con {len(entradas)} archivos de {', '.join(pacientes)}; revisión de píxeles pendiente: {', '.join(pendientes) or 'ninguno'}"
+              + (f"; avisos: {len(avisos)}" if avisos else ""))
+    return {"ruta": str(final), "archivos": len(entradas), "pacientes": pacientes, "revision_pixeles_pendiente": pendientes,
+            "hashes": {rel: h for _, _, h, rel in entradas}, "sha256": huella, "manifiesto_local": str(manifiesto_local), "avisos": avisos,
+            "demografia": demografia, "exportacion": dict(exportacion), "orden_sin_verificar": sorted(serie for serie, o in orden_series.items() if o and o["criterio"] == CRITERIO_DESEMPATE)}
+
+
+@api.post("/empaquetar")
+def empaquetar(request: Request, cuerpo: dict):
+    auth(request)
+    pacientes = sorted({str(p) for p in cuerpo.get("pacientes", [])})
+    if not pacientes:
+        raise HTTPException(400, "elige al menos un paciente / pick at least one patient")
+    try:
+        r = crear_paquete(pacientes)
+        for clave in ("hashes", "sha256", "exportacion", "demografia"):
+            r.pop(clave, None)
+        return r
+    except PaqueteRechazado as e:
+        if "detail" in e.cuerpo:
+            restos = e.cuerpo.get("restos", [])
+            return JSONResponse(status_code=e.codigo, content={"detail": e.cuerpo["detail"] + texto_restos(restos), "restos": restos})
+        return JSONResponse(status_code=e.codigo, content=e.cuerpo)
+
+
+# --------------------------------------------------------------------------------------
+# modo rápido: una carpeta, de principio a fin / express mode
+# --------------------------------------------------------------------------------------
+# Reglas:
+#  - El zip contiene exactamente las salidas limpias que la limpieza de ESTA corrida produjo o verificó (nuevas,
+#    actualizadas y duplicados verificados), según la lista que escribe anonimizar.py. No se usa el índice histórico
+#    por carpeta: lo que alguna vez salió de esa carpeta y ya no está en ella no entra.
+#  - El zip de una corrida nace SIEMPRE con la revisión de píxeles pendiente, exista o no una revisión anterior
+#    del paciente, y se queda en la carpeta de trabajo local. Solo tras registrar la revisión de esa corrida se
+#    escribe en el destino elegido.
+#  - La revisión se aplica al conjunto congelado de la corrida (rutas y hashes): si algo cambió, se rechaza.
+
+PASOS_RAPIDO = [("limpieza", "Limpieza"), ("compuerta", "Compuerta de metadatos"), ("cotejo", "Cotejo con el original"),
+                ("emparejamiento", "Emparejamiento CT + PET"), ("suv", "SUV original / limpio"), ("paquete", "Paquete")]
+
+
+def validar_origen(origen: Path) -> None:
+    if not origen.is_dir():
+        raise HTTPException(400, "la carpeta de originales no existe / originals folder not found")
+    marca = en_sincronizada(TRABAJO)
+    if marca:
+        raise HTTPException(400, f"la carpeta de trabajo está dentro de una carpeta sincronizada ({marca}); elige otra")
+    o = origen.resolve()
+    for prohibida in (TRABAJO / "limpios", carpeta_privada(), carpeta_reportes(), TRABAJO / "paquetes"):
+        pr = prohibida.resolve()
+        if o == pr or o.is_relative_to(pr) or pr.is_relative_to(o):
+            raise HTTPException(400, "la carpeta de originales se solapa con la copia limpia, la privada, los reportes o los paquetes; elige otra")
+
+
+def validar_destino(destino: Path, origen: Path) -> Path:
+    """Destino del zip ya revisado: cualquier carpeta existente salvo las internas de la aplicación y la de originales."""
+    por_defecto = (TRABAJO / "paquetes").resolve()
+    d = destino.resolve()
+    if d == por_defecto:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    if not d.is_dir():
+        raise HTTPException(400, "la carpeta de destino no existe; elígela con el selector o créala antes")
+    for prohibida, nombre in ((TRABAJO / "limpios", "la copia limpia"), (carpeta_privada(), "la carpeta privada"),
+                              (carpeta_reportes(), "los reportes"), (origen.resolve(), "la carpeta de originales")):
+        pr = Path(prohibida).resolve()
+        if d == pr or d.is_relative_to(pr):
+            raise HTTPException(400, f"el destino no puede estar dentro de {nombre}; elige otra carpeta")
+    return d
+
+
+def clasificar_suv(codigo: int, informe: dict, salida: str) -> tuple[str, str]:
+    """(estado, etiqueta): distingue una discrepancia real de 'no se puede calcular' y de un problema de orden."""
+    if codigo == 0 and informe.get("veredicto") == "IDENTICO":
+        return "ok", "IDENTICO"
+    if informe.get("voxeles_distintos", 0) or informe.get("factores_identicos") is False or informe.get("intervalos_identicos") is False:
+        return "error", f"DISCREPANCIA: {informe.get('voxeles_distintos', 0)} vóxeles distintos entre original y limpio"
+    textos = " ".join(informe.get("detalles", []) + informe.get("problemas_de_correspondencia", [])) + salida
+    if "no calculable" in textos or "SUVbw no calculable" in textos:
+        motivo = next((d.split("no calculable:")[-1].strip() for d in informe.get("detalles", []) if "no calculable" in d), "faltan atributos")
+        return "aviso", f"no se puede calcular el SUV ({motivo}); no es una discrepancia"
+    if informe.get("correspondencia_completa") is False:
+        return "aviso", "correspondencia incompleta entre original y limpio: " + "; ".join(informe.get("problemas_de_correspondencia", []))[:120]
+    if informe.get("orden_y_geometria_ok") is False:
+        return "aviso", "orden o geometría incoherentes en la serie: " + "; ".join(informe.get("problemas_de_orden_y_geometria", []))[:120]
+    return "aviso", "sin veredicto"
+
+
+def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
+    t = TRABAJOS[tid]
+    pasos = {c: {"clave": c, "titulo": titulo, "estado": "pendiente", "resumen": "", "salida": ""} for c, titulo in PASOS_RAPIDO}
+    t["pasos"] = [pasos[c] for c, _ in PASOS_RAPIDO]
+    limpios = (TRABAJO / "limpios").resolve()
+
+    def paso(clave: str, estado: str, resumen: str = "", salida: str = "") -> None:
+        pasos[clave].update(estado=estado, resumen=resumen, salida=salida[-6000:])
+
+    restos_temporales: list[str] = []
+
+    def terminar(estado: str, mensaje: str) -> None:
+        for c, _ in PASOS_RAPIDO:
+            if pasos[c]["estado"] in ("pendiente", "corriendo"):
+                pasos[c]["estado"] = "omitido"
+        if restos_temporales:
+            mensaje += " No se pudieron eliminar estas listas temporales de la carpeta privada; bórralas a mano: " + ", ".join(restos_temporales) + "."
+            if estado == "ok":
+                estado = "con avisos"
+        t["estado"], t["mensaje"] = estado, mensaje
+        registrar(f"rápido: {estado}; {mensaje}")
+
+    try:
+        # 1. limpieza
+        paso("limpieza", "corriendo")
+        carpeta_privada().mkdir(parents=True, exist_ok=True)
+        lista = carpeta_privada() / f".lista_rapido_{tid}.json"
+        try:
+            codigo, salida = ejecutar(comando_herramienta("anonimizar") + ["limpiar", str(origen), str(TRABAJO / "limpios"),
+                                      "--mapa", str(carpeta_privada() / "mapa_seudonimos.json"), "--prefijo", prefijo,
+                                      "--lista-salida", str(lista)])
+            try:
+                datos_lista = json.loads(lista.read_text(encoding="utf-8"))
+                rels = sorted(set(datos_lista["archivos"]))
+                entradas_aceptadas = int(datos_lista.get("entradas_aceptadas", len(rels)))
+            except (OSError, ValueError, KeyError):
+                rels = None
+        finally:
+            if not _eliminar(lista):
+                restos_temporales.append(str(lista))
+        listo = next((l for l in salida.splitlines() if l.startswith("Listo")), "").replace(" (done)", "")
+        if codigo not in (0, 1) or rels is None:
+            paso("limpieza", "error", "la limpieza no terminó", salida)
+            return terminar("error", "La limpieza falló; no se creó ningún zip.")
+        paso("limpieza", "ok" if codigo == 0 else "aviso", listo or "limpieza terminada", salida)
+        indexar()
+        archivos = [limpios / r_ for r_ in rels]
+        if not rels or not all(a.is_file() for a in archivos):
+            return terminar("error", "Ningún archivo de esa carpeta quedó limpio (¿son CT, PET o MR?); no se creó ningún zip.")
+        pacientes = sorted({r_.split("/")[0] for r_ in rels})
+        t["pacientes"] = pacientes
+        otros = {pac: len(hashes_paciente(pac)) - sum(1 for r_ in rels if r_.startswith(pac + "/")) for pac in pacientes}
+        t["otros_archivos_del_paciente"] = {pac: n for pac, n in otros.items() if n > 0}
+
+        # 2. compuerta: exactamente los archivos de esta corrida
+        paso("compuerta", "corriendo")
+        fallos = {}
+        for a, rel in zip(archivos, rels):
+            problemas, _ = ANON.verificar_bytes(a.read_bytes(), prefijo)
+            if problemas:
+                fallos[rel] = problemas
+        if fallos:
+            paso("compuerta", "error", f"{len(fallos)} archivo(s) con problemas en los metadatos",
+                 "\n".join(f"{r_}: {'; '.join(ps)}" for r_, ps in list(fallos.items())[:30]))
+            return terminar("error", "La compuerta de metadatos falló; no se creó ningún zip.")
+        paso("compuerta", "ok", f"metadatos en regla en los {len(rels)} archivos de esta carpeta")
+
+        # 3. cotejo, sobre el conjunto exacto de esta corrida: cada original presente debe llegar a uno de estos archivos,
+        #    cada uno de estos archivos debe venir de un original presente y coincidir byte a byte. Los archivos guardados
+        #    del paciente que no son de esta corrida (por ejemplo, cortes retirados de la carpeta) no se examinan aquí.
+        paso("cotejo", "corriendo")
+        lista_corrida = carpeta_privada() / f".lista_corrida_{tid}.json"     # la usan el cotejo, el emparejamiento y el SUV
+        _escribir_json(lista_corrida, {"archivos": rels})
+        codigo, salida = ejecutar(comando_herramienta("cotejar") + [str(origen), str(TRABAJO / "limpios"),
+                                  "--mapa", str(carpeta_privada() / "mapa_seudonimos.json"), "--solo-lista", str(lista_corrida)])
+        veredicto = next((l for l in salida.splitlines() if l.startswith("Veredicto")), "")
+        iguales = next((l.strip() for l in salida.splitlines() if "coinciden byte a byte" in l), "")
+        if codigo != 0:
+            paso("cotejo", "error", veredicto or "el cotejo no terminó", salida)
+            return terminar("error", "La copia limpia no coincide con la limpieza recalculada; no se creó ningún zip.")
+        n_cotejados = int(m.group(1)) if (m := re.search(r"coinciden byte a byte:\s*(\d+)", salida)) else -1
+        if n_cotejados != entradas_aceptadas:
+            paso("cotejo", "error", f"el cotejo cubrió {n_cotejados} archivo(s) y la limpieza de esta corrida aceptó {entradas_aceptadas}", salida)
+            return terminar("error", "El cotejo y la limpieza no cubren el mismo conjunto de archivos; no se creó ningún zip.")
+        paso("cotejo", "ok", f"{veredicto}; {iguales}".strip("; "), salida)
+
+        # 4. emparejamiento por estudio de esta corrida (informa; no bloquea)
+        paso("emparejamiento", "corriendo")
+        estudios_dir = sorted({a.parents[1] for a in archivos})
+        textos, estados = [], []
+        for d in estudios_dir:
+            codigo, salida = ejecutar(comando_herramienta("emparejar") + [str(d), "--solo-lista", str(lista_corrida)])
+            linea = next((l.strip() for l in salida.splitlines() if " + PET " in l), "")
+            nombre = f"{d.parent.name}/{d.name}"
+            if codigo == 0:
+                textos.append(f"{nombre}: {linea or 'CANDIDATO COMPATIBLE'}"); estados.append("ok")
+            elif codigo == 1:
+                textos.append(f"{nombre}: PAR INCONSISTENTE: {linea or 'CT y PET no corresponden'}"); estados.append("aviso")
+            else:
+                textos.append(f"{nombre}: no evaluable (falta CT o PET, o información insuficiente)"); estados.append("omitido")
+        peor = "aviso" if "aviso" in estados else ("ok" if "ok" in estados else "omitido")
+        paso("emparejamiento", peor, "; ".join(textos)[:300], "\n".join(textos))
+
+        # 5. SUV original / limpio por serie PET de esta corrida
+        paso("suv", "corriendo")
+        series_dir = {str(a.parent.resolve()) for a in archivos}
+        series_pt = [s_ for s_ in INDICE.values() if s_["modalidad"] == "PT" and str(Path(s_["cortes"][0][1]).parent.resolve()) in series_dir]
+        if not series_pt:
+            paso("suv", "omitido", "no hay series PET en esta carpeta")
+        else:
+            textos, estados = [], []
+            for s_ in series_pt:
+                fd, tmpj = tempfile.mkstemp(suffix=".json")
+                os.close(fd)
+                try:
+                    codigo, salida = ejecutar(comando_herramienta("suv") + ["comparar", str(Path(s_["cortes"][0][1]).parent),
+                                              "--privado", str(carpeta_privada()), "--json", tmpj, "--solo-lista", str(lista_corrida)])
+                    try:
+                        informe = json.loads(Path(tmpj).read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        informe = {}
+                finally:
+                    Path(tmpj).unlink(missing_ok=True)
+                estado_s, etiqueta = clasificar_suv(codigo, informe, salida)
+                textos.append(f"{s_['paciente']} {s_['serie']}: {etiqueta}"); estados.append(estado_s)
+            if "error" in estados:
+                paso("suv", "error", "; ".join(textos)[:300], "\n".join(textos))
+                return terminar("error", "El SUV calculado sobre la copia limpia difiere del original; no se creó ningún zip.")
+            paso("suv", "aviso" if "aviso" in estados else "ok", "; ".join(textos)[:300], "\n".join(textos))
+
+        # 6. paquete: exactamente estos archivos, con la revisión pendiente, en la carpeta de trabajo local.
+        #    La correspondencia de nombres exportados se calcula UNA vez, sobre los archivos de esta corrida, y se congela:
+        #    el zip pendiente y el revisado llevan los mismos nombres aunque después se importe más de este paciente.
+        paso("paquete", "corriendo")
+        exportacion, orden_series = mapa_exportacion(rels)
+        t["exportacion"], t["orden_de_cortes"] = exportacion, orden_series
+        t["series_corrida"] = series_congeladas(exportacion, orden_series)
+        # La demografía de la corrida se calcula una vez, sobre sus archivos exactos, y se congela: el zip pendiente, el
+        # revisado y el visor de la corrida muestran lo mismo aunque después se importe más de este paciente.
+        t["demografia"] = demografia_de(rels)
+        try:
+            r = crear_paquete(pacientes, TRABAJO / "paquetes", solo=set(rels), exportacion=exportacion, orden_series=orden_series,
+                              demografia=t["demografia"], revision_corrida={"estado": "pendiente", "detalle": "revisión de píxeles de esta corrida sin registrar"})
+        except PaqueteRechazado as e:
+            paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000])
+            return terminar("error", "El paquete no se creó." + texto_restos(e.cuerpo.get("restos", [])))
+        t["zip"], t["archivos"] = r["ruta"], r["hashes"]
+        t["revision_pixeles_pendiente"] = r["revision_pixeles_pendiente"]
+        t["destino_sincronizado"] = en_sincronizada(destino)
+        extra = "".join(f" {pac} tiene además {n} archivo(s) de importaciones anteriores que no entran en este zip." for pac, n in t["otros_archivos_del_paciente"].items())
+        sin_verificar = sorted(serie for serie, o in orden_series.items() if o["criterio"] == CRITERIO_DESEMPATE)
+        por_posicion = sorted(serie for serie, o in orden_series.items() if o["criterio"] == CRITERIO_POSICION)
+        nota_orden = (f" Orden de cortes NO verificado en {len(sin_verificar)} serie(s): {', '.join(x.split('/')[-1] for x in sin_verificar)}." if sin_verificar else "") + \
+                     (f" {len(por_posicion)} serie(s) ordenadas por posición, sin InstanceNumber utilizable." if por_posicion else "")
+        paso("paquete", "aviso" if sin_verificar else "ok",
+             f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}",
+             r["ruta"] + "\n" + "\n".join(f"{serie}: {o['criterio']}" + (f" ({o['aviso']})" if o["aviso"] else "") for serie, o in sorted(orden_series.items())))
+        hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
+        terminar("con avisos" if hay_avisos else "ok",
+                 "Zip creado en la carpeta de trabajo con la revisión de píxeles pendiente. Pasará al destino elegido cuando registres la revisión.")
+    except Exception as e:   # nada debe dejar el trabajo colgado
+        terminar("error", f"Error inesperado ({type(e).__name__}); no se creó ningún zip.")
+    finally:
+        sobrante = carpeta_privada() / f".lista_corrida_{tid}.json"
+        if not _eliminar(sobrante):
+            t["mensaje"] = (t.get("mensaje") or "") + f" No se pudo eliminar una lista temporal de la carpeta privada; bórrala a mano: {sobrante}."
+            if t.get("estado") == "ok":
+                t["estado"] = "con avisos"
+        CANDADO.release()
+
+
+def series_congeladas(exportacion: dict[str, str], orden_series: dict[str, dict]) -> list[dict]:
+    """Las series de una corrida con sus archivos en el orden del paquete: el de sus nombres exportados."""
+    por_serie: dict[str, list[tuple[str, str]]] = {}
+    for interno, exportado in exportacion.items():
+        por_serie.setdefault(exportado.rsplit("/", 1)[0], []).append((exportado, interno))
+    out = []
+    for serie in sorted(por_serie):
+        pares = sorted(por_serie[serie])
+        partes = serie.rsplit("/", 1)[1].split("_")
+        o = orden_series.get(serie) or {}
+        out.append({"serie": serie, "modalidad": partes[2] if len(partes) >= 4 else "", "n": len(pares),
+                    "criterio": o.get("criterio"), "aviso": o.get("aviso"),
+                    "archivos": [interno for _, interno in pares], "nombres": [exportado.rsplit("/", 1)[1] for exportado, _ in pares]})
+    return out
+
+
+def corrida_con_zip(tid: str) -> dict:
+    t = TRABAJOS.get(tid)
+    if not t or t.get("nombre") != "rapido" or t.get("estado") == "corriendo" or not t.get("zip"):
+        raise HTTPException(404, "no hay una corrida del modo rápido con paquete para ese identificador")
+    return t
+
+
+def png_de_corrida(t: dict, indice: int, k: int, ventana: str) -> bytes:
+    """El corte k (desde 1) de la serie `indice` de la corrida, en el orden congelado del paquete. Solo se muestra si el
+    archivo sigue siendo, byte a byte, el que entró en el paquete."""
+    series = t.get("series_corrida") or []
+    if not 0 <= indice < len(series) or not 1 <= k <= series[indice]["n"]:
+        raise HTTPException(404, "corte fuera de rango")
+    rel = series[indice]["archivos"][k - 1]
+    ruta = (TRABAJO / "limpios").resolve() / rel
+    # Una sola lectura: el hash se calcula sobre estos bytes y la imagen se dibuja desde estos mismos bytes. La ruta no
+    # se vuelve a abrir, así que un cambio en disco después de esta línea no puede llegar a la pantalla.
+    try:
+        datos = ruta.read_bytes()
+    except OSError:
+        raise HTTPException(409, "este archivo cambió desde la corrida o ya no está; vuelve a ejecutar el modo rápido")
+    if hashlib.sha256(datos).hexdigest() != t["archivos"].get(rel):
+        raise HTTPException(409, "este archivo cambió desde la corrida; vuelve a ejecutar el modo rápido")
+    return render_bytes(datos, ventana if ventana in VENTANAS or ventana == "auto" else "tejido")
+
+
+@api.get("/rapido/{tid}/series")
+def rapido_series(request: Request, tid: str):
+    """Las series de la corrida y los nombres exportados de sus archivos, en el orden del paquete."""
+    auth(request)
+    t = corrida_con_zip(tid)
+    por_estudio = {f"{d['paciente']}/{d['estudio']}": d for d in t.get("demografia", [])}
+    return [{"indice": i, **{k: v for k, v in s_.items() if k != "archivos"}, "demografia": por_estudio.get(s_["serie"].rsplit("/", 1)[0])}
+            for i, s_ in enumerate(t["series_corrida"])]
+
+
+@api.get("/rapido/{tid}/corte/{indice}/{k}")
+def rapido_corte(request: Request, tid: str, indice: int, k: int, ventana: str = "tejido"):
+    auth(request)
+    return Response(png_de_corrida(corrida_con_zip(tid), indice, k, ventana), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@api.post("/rapido")
+def rapido(request: Request, cuerpo: dict):
+    """Una carpeta, de principio a fin: limpiar, verificar, cotejar, emparejar, comparar SUV y empaquetar."""
+    auth(request)
+    origen = Path(str(cuerpo.get("origen", ""))).expanduser()
+    validar_origen(origen)
+    destino_txt = str(cuerpo.get("destino", "")).strip()
+    destino = validar_destino(Path(destino_txt).expanduser() if destino_txt else TRABAJO / "paquetes", origen)
+    prefijo = prefijo_actual()
+    if not CANDADO.acquire(blocking=False):
+        raise HTTPException(409, "ya hay un trabajo en curso / a job is already running")
+    tid = secrets.token_hex(4)
+    TRABAJOS[tid] = {"nombre": "rapido", "estado": "corriendo", "lineas": [], "codigo": None, "pasos": [], "pacientes": [],
+                     "origen": str(origen), "destino": str(destino), "zip": None, "mensaje": "", "archivos": {}, "revisado": False,
+                     "exportacion": {}, "orden_de_cortes": {}, "series_corrida": [], "demografia": []}
+    threading.Thread(target=_rapido, args=(tid, origen, destino, prefijo), daemon=True).start()
+    registrar("rápido: iniciado")
+    return {"trabajo": tid, "destino": str(destino)}
+
+
+def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
+    """Registra la revisión sin hallazgos del conjunto congelado de una corrida y lleva el zip revisado al destino.
+    Orden: candado; comprobación previa por hash; empaquetado que vuelve a comparar los hashes congelados con los
+    bytes que empaqueta, antes de escribir nada; solo un zip ya comprobado se copia al destino."""
+    if not t or t.get("nombre") != "rapido" or t.get("estado") == "corriendo" or not t.get("zip") or not t.get("archivos"):
+        raise HTTPException(400, "no hay un zip del modo rápido al que aplicar la revisión")
+    if t.get("revisado"):
+        raise HTTPException(409, "la revisión de esta corrida ya está registrada")
+    error = validar_registro_revision("sin_hallazgos", [], revisor)
+    if error:
+        raise HTTPException(400, error)
+    if not CANDADO.acquire(blocking=False):
+        raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de registrar la revisión")
+    try:
+        limpios = (TRABAJO / "limpios").resolve()
+        cambiados = [rel for rel, h in t["archivos"].items()
+                     if not (limpios / rel).is_file() or sha256_archivo(limpios / rel) != h]
+        if cambiados:
+            registrar(f"rápido: revisión rechazada, {len(cambiados)} archivo(s) cambiaron desde la corrida")
+            raise HTTPException(409, f"{len(cambiados)} archivo(s) de esta corrida cambiaron o ya no están; vuelve a ejecutar el modo rápido antes de registrar la revisión")
+        destino = validar_destino(Path(t["destino"]), Path(t["origen"]))
+        fecha = dt.datetime.now().isoformat(timespec="seconds")
+        revision = {"estado": "sin_hallazgos", "revisor": revisor, "fecha": fecha, "hallazgos": [],
+                    "detalle": "revisión registrada sobre el conjunto exacto de archivos de esta corrida"}
+        carpeta_reportes().mkdir(parents=True, exist_ok=True)
+        registro_revision = carpeta_reportes() / f"revision_rapido_{dt.datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(2)}.json"
+        registro_preparado = registro_revision.with_name(registro_revision.name + SUFIJO_PREPARADO)
+
+        def evidencia(info: dict) -> None:
+            # Se escribe ANTES de publicar: si no se puede guardar el registro de la revisión, el zip no sale.
+            _escribir_json(registro_preparado, {**revision, "app": VERSION, "pacientes": t["pacientes"], "archivos": t["archivos"],
+                                                "zip": {"nombre": info["nombre"], "destino": str(destino), "sha256": info["sha256"]},
+                                                "nota": f"Se escribe antes de publicar el zip. Con el sufijo {SUFIJO_PREPARADO} no acredita ninguna publicación; al confirmarse la publicación el archivo pierde ese sufijo."})
+
+        try:
+            r = crear_paquete(t["pacientes"], destino, solo=set(t["archivos"]), revision_corrida=revision,
+                              hashes_esperados=dict(t["archivos"]), antes_de_publicar=evidencia,
+                              exportacion=dict(t["exportacion"]), orden_series=dict(t["orden_de_cortes"]),   # los mismos nombres que el zip pendiente
+                              demografia=t["demografia"])                                                     # y la misma demografía
+        except PaqueteRechazado as e:
+            # la publicación no ocurrió: se retira la evidencia preparada, y lo que no se pueda retirar se dice con su ruta
+            restos = list(e.cuerpo.get("restos", []))
+            if not _eliminar(registro_preparado):
+                restos.append(str(registro_preparado))
+            if restos:
+                registrar(f"rápido: publicación fallida con restos sin retirar: {', '.join(restos)}")
+            if e.cuerpo.get("fallos"):
+                registrar("rápido: revisión rechazada al empaquetar; un archivo cambió entre la comprobación y el empaquetado")
+                raise PublicacionFallida(409, f"{len(e.cuerpo['fallos'])} archivo(s) de esta corrida cambiaron o ya no están; nada se escribió en el destino. Vuelve a ejecutar el modo rápido." + texto_restos(restos), restos)
+            raise PublicacionFallida(e.codigo, (e.cuerpo.get("detail") or e.cuerpo.get("error") or "el paquete no se pudo rehacer") + "." + texto_restos(restos), restos)
+
+        # ---- a partir de aquí el zip revisado está publicado: todo lo que falle es un aviso, con la ruta a la vista ----
+        t["zip_pendiente_anterior"] = t["zip"]
+        anterior = Path(t["zip"])
+        t["zip"], t["revision_pixeles_pendiente"], t["revisado"] = r["ruta"], r["revision_pixeles_pendiente"], True
+        avisos_posteriores = list(r.get("avisos", []))
+        registro_confirmado = True
+        try:
+            os.replace(registro_preparado, registro_revision)   # la evidencia preparada pasa a registro confirmado
+        except OSError:
+            registro_confirmado, registro_revision = False, registro_preparado
+            avisos_posteriores.append(f"el registro de la revisión quedó con su nombre provisional aunque el zip está publicado: {registro_preparado}")
+        cubiertos = []
+        for pac in t["pacientes"]:
+            try:   # la revisión del paciente completo solo se actualiza si la corrida cubre todos sus archivos guardados
+                if set(hashes_paciente(pac)) == {rel.split("/", 1)[1] for rel in t["archivos"] if rel.startswith(pac + "/")}:
+                    guardar_revision(pac, "sin_hallazgos", [], revisor, "registrada desde el modo rápido; cubre todos los archivos del paciente")
+                    cubiertos.append(pac)
+            except Exception as e:
+                avisos_posteriores.append(f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); el zip publicado y su registro no cambian")
+        no_eliminados = [str(v) for v in (anterior, anterior.with_name(anterior.name[:-4] + ".manifiesto.json"))
+                         if v.resolve() != Path(r["ruta"]).resolve() and not _eliminar(v)]
+        hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
+        t["mensaje"] = "Zip revisado y guardado en el destino." + (" Hay avisos en los pasos de arriba." if hay_avisos else "")
+        registrar(f"rápido: revisión registrada por {revisor}; zip en el destino; pacientes con revisión completa: {', '.join(cubiertos) or 'ninguno'}"
+                  + (f"; avisos posteriores: {len(avisos_posteriores) + len(no_eliminados)}" if avisos_posteriores or no_eliminados else ""))
+        return {"zip": r["ruta"], "revision_pixeles_pendiente": r["revision_pixeles_pendiente"], "mensaje": t["mensaje"],
+                "avisos": hay_avisos, "pendiente_anterior_no_eliminado": no_eliminados, "avisos_posteriores": avisos_posteriores,
+                "registro_revision": str(registro_revision), "registro_confirmado": registro_confirmado,
+                "revision_de_paciente_actualizada": cubiertos,
+                "destino_sincronizado": en_sincronizada(destino)}
+    finally:
+        CANDADO.release()
+
+
+@api.post("/rapido/revision")
+def rapido_revision(request: Request, cuerpo: dict):
+    """Tras recorrer todos los cortes: registra la revisión de la corrida y escribe el zip revisado en el destino."""
+    auth(request)
+    try:
+        return aplicar_revision_rapido(TRABAJOS.get(str(cuerpo.get("trabajo", ""))), str(cuerpo.get("revisor", "")).strip()[:120])
+    except PublicacionFallida as e:
+        return JSONResponse(status_code=e.codigo, content={"detail": e.mensaje, "restos": e.restos})
 
 
 def raices_reubicadas() -> dict[str, str]:
@@ -720,7 +1460,7 @@ def comprobar(request: Request, cuerpo: dict):
 
 def hashes_paciente(pac: str) -> dict[str, str]:
     carpeta = carpeta_paciente(pac)
-    return {str(p.relative_to(carpeta)): sha256_archivo(p) for p in archivos_regulares(carpeta) if p.suffix.lower() == ".dcm"}
+    return {p.relative_to(carpeta).as_posix(): sha256_archivo(p) for p in archivos_regulares(carpeta) if p.suffix.lower() == ".dcm"}
 
 
 HALLAZGOS_VALIDOS = ("texto_grabado", "rostro", "otro")
@@ -774,6 +1514,21 @@ def leer_revision(pac: str) -> dict:
     return evaluar_registro_revision(r, hashes_paciente(pac))
 
 
+def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "") -> dict:
+    """Escribe el registro de revisión de píxeles de un paciente, ligado a los hashes de sus archivos."""
+    try:
+        politica = json.loads((TRABAJO / "limpios" / ".politica.json").read_text(encoding="utf-8")).get("politica", "")
+    except (OSError, ValueError):
+        politica = ""
+    registro = {"paciente": pac, "estado": estado, "hallazgos": hallazgos, "notas": notas, "revisor": revisor,
+                "fecha": dt.datetime.now().isoformat(timespec="seconds"), "app": VERSION, "politica": politica,
+                "archivos": hashes_paciente(pac)}
+    carpeta_reportes().mkdir(parents=True, exist_ok=True)
+    (carpeta_reportes() / f"revision_pixeles_{pac}.json").write_text(json.dumps(registro, ensure_ascii=False, indent=2), encoding="utf-8")
+    registrar(f"revisión de píxeles: {pac} → {estado} ({len(registro['archivos'])} archivos)")
+    return leer_revision(pac)
+
+
 @api.get("/revision/{pac}")
 def revision(request: Request, pac: str):
     auth(request)
@@ -793,14 +1548,7 @@ def registrar_revision(request: Request, cuerpo: dict):
     error = validar_registro_revision(estado, hallazgos, revisor)
     if error:
         raise HTTPException(400, error)
-    registro = {"paciente": pac, "estado": estado, "hallazgos": hallazgos, "notas": str(cuerpo.get("notas", ""))[:2000],
-                "revisor": revisor, "fecha": dt.datetime.now().isoformat(timespec="seconds"),
-                "app": VERSION, "politica": prefijo_actual() and json.loads((TRABAJO / "limpios" / ".politica.json").read_text(encoding="utf-8")).get("politica", ""),
-                "archivos": hashes_paciente(pac)}
-    carpeta_reportes().mkdir(parents=True, exist_ok=True)
-    (carpeta_reportes() / f"revision_pixeles_{pac}.json").write_text(json.dumps(registro, ensure_ascii=False, indent=2), encoding="utf-8")
-    registrar(f"revisión de píxeles: {pac} → {estado} ({len(registro['archivos'])} archivos)")
-    return leer_revision(pac)
+    return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
 
 
 @api.get("/registro")
@@ -822,8 +1570,33 @@ HTML = """<!doctype html>
   <span class="lema">anonimizar · revisar · enviar · todo en 127.0.0.1</span>
   <span class="version" id="version"></span>
 </header>
-<nav class="pestanas"><button data-tab="entrada" class="activa"><span class="paso">1</span>Entrada</button><button data-tab="estudios"><span class="paso">2</span>Estudios</button><button data-tab="enviar"><span class="paso">3</span>Enviar</button><button data-tab="registro"><span class="paso">·</span>Registro</button></nav>
+<nav class="pestanas"><button data-tab="rapido" title="Una carpeta, de principio a fin, con un solo botón"><span class="paso">»</span>Rápido</button><button data-tab="entrada" class="activa"><span class="paso">1</span>Entrada</button><button data-tab="estudios"><span class="paso">2</span>Estudios</button><button data-tab="enviar"><span class="paso">3</span>Enviar</button><button data-tab="registro"><span class="paso">·</span>Registro</button></nav>
 <main>
+<section id="rapido" class="pestana">
+  <h2>Anonimizar una carpeta, de principio a fin</h2>
+  <p class="suave">Un solo botón: limpia la carpeta, comprueba los metadatos, coteja con el original, empareja CT y PET, compara el SUV y deja un zip donde tú digas. Mirar las imágenes sigue siendo tarea de una persona: el zip nace con la revisión de píxeles pendiente y se queda en la carpeta de trabajo; cuando registres la revisión de esta corrida, pasa al destino que elijas.</p>
+  <div class="fila"><input type="text" id="rap-origen" placeholder="Carpeta del estudio, en el disco local"><button id="btn-rap-origen">Elegir carpeta…</button></div>
+  <div class="fila"><input type="text" id="rap-destino" placeholder="Dónde guardar el zip ya revisado"><button id="btn-rap-destino">Elegir destino…</button></div>
+  <div class="fila"><button id="btn-rapido" class="primario">Anonimizar carpeta</button><span id="rap-reloj" class="terciario"></span></div>
+  <div id="rap-estado"></div>
+  <div id="rap-pasos" class="pasos"></div>
+  <div id="rap-revision" class="oculto">
+    <div class="fila"><input type="text" id="rap-revisor" placeholder="quien revisa" class="corto"><button id="btn-rap-revision">Revisé todos los cortes: sin hallazgos</button></div>
+    <p class="terciario">Recorre aquí abajo todos los cortes de todas las series antes de registrar. La revisión vale para los archivos exactos de esta corrida: si alguno cambia, hay que repetirla. Al registrar, el zip revisado se escribe en el destino y el pendiente se elimina de la carpeta de trabajo.</p>
+  </div>
+  <div id="rap-visor" class="oculto">
+    <h3>Los archivos de este paquete, en su orden</h3>
+    <p class="terciario">Son exactamente los archivos del zip de esta corrida, con la numeración de sus nombres. Importaciones posteriores no cambian esta lista. La pestaña Estudios muestra todo lo guardado del paciente, que puede ser más.</p>
+    <div class="fila" id="rap-series"></div>
+    <p id="rap-etiqueta-estudio" class="etiqueta-estudio"></p><div id="rap-aviso-demografia"></div>
+    <div class="visor-corrida"><div class="lienzo"><img id="rap-corte" alt="corte de la corrida"></div>
+      <div><input type="range" id="rap-deslizador" min="1" max="1" value="1">
+        <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label></div>
+        <p id="rap-etiqueta" class="mono"></p>
+        <div id="rap-orden"></div></div></div>
+  </div>
+  <details id="rap-detalles" class="oculto"><summary>Salida de cada paso</summary><pre id="rap-salida" class="salida"></pre></details>
+</section>
 <section id="entrada" class="pestana activa">
   <h2>Carpeta con los DICOM originales</h2>
   <p class="suave">Solo se leen desde donde están. La copia limpia se escribe en la carpeta de trabajo. Los objetos que no son CT, PET, MR o segmentación van a cuarentena y no se copian.</p>
@@ -839,12 +1612,13 @@ HTML = """<!doctype html>
 </section>
 <section id="estudios" class="pestana">
   <div class="fila"><h2 class="sin-margen">Estudios limpios</h2><button id="btn-refrescar">Refrescar</button><span id="resumen-estudios" class="terciario"></span></div>
-  <div class="tabla-marco"><table id="tabla-series" class="datos"><thead><tr><th>Paciente</th><th>Estudio</th><th>Serie</th><th>Mod.</th><th>Descripción</th><th class="num">Cortes</th><th>Matriz</th><th>Política</th></tr></thead><tbody></tbody></table></div>
+  <div class="tabla-marco"><table id="tabla-series" class="datos"><thead><tr><th>Paciente</th><th>Sexo · edad en el estudio</th><th>Estudio</th><th>Serie</th><th>Mod.</th><th>Descripción</th><th class="num">Cortes</th><th>Matriz</th><th>Política</th></tr></thead><tbody></tbody></table></div>
   <div class="visor oculto" id="visor">
     <div><div class="lienzo"><img id="corte" alt="corte"></div><input type="range" id="deslizador" min="0" max="0" value="0">
       <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><span id="pos" class="terciario"></span></div>
-      <p class="terciario">Vista previa ordenada por número de instancia, sin escala cuantitativa. El SUV se calcula en las comprobaciones, no aquí.</p></div>
-    <div><div class="meta" id="meta"></div>
+      <p class="terciario"><span id="nota-orden">Cortes ordenados por InstanceNumber.</span> Vista previa sin escala cuantitativa; el SUV se calcula en las comprobaciones, no aquí. Al exportar, los archivos se numeran con este mismo orden.</p>
+      <div id="aviso-orden"></div></div>
+    <div><p id="etiqueta-estudio" class="etiqueta-estudio"></p><div id="aviso-demografia"></div><div class="meta" id="meta"></div>
       <h3 style="margin-top:16px">Comprobaciones</h3>
       <div class="fila" id="botones-comprobar"><button data-que="emparejar">Emparejar CT + PET</button><button data-que="cotejar">Cotejar con el original</button><button data-que="suv">SUV de esta serie</button><button data-que="comparar_suv">Comparar SUV original / limpio</button></div>
       <p class="terciario">Alcance: emparejar y cotejar actúan sobre el paciente en pantalla; SUV y la comparación, sobre esta serie.</p>
@@ -915,11 +1689,100 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 async function estado() {
   try {
     const e = await api('estado');
-    texto('#trabajo', e.trabajo); $('#prefijo').value = e.prefijo || 'ANON'; texto('#version', 'v' + e.version + (e.congelado ? ' · paquete' : ' · código fuente'));
+    texto('#trabajo', e.trabajo); $('#prefijo').value = e.prefijo || 'ANON'; if (!$('#rap-destino').value) $('#rap-destino').value = e.trabajo.replace(/[\\/]+$/, '') + (e.trabajo.includes('\\') ? '\\paquetes' : '/paquetes'); texto('#version', 'v' + e.version + (e.congelado ? ' · paquete' : ' · código fuente'));
     if (e.sincronizada) { const s = $('#aviso-trabajo'); s.textContent = ''; s.appendChild(insignia('error', 'carpeta sincronizada con la nube: ' + e.sincronizada + '; usa otra con --trabajo')); }
     if (!e.anonimizar_presente) mensaje('#estado-anon', 'error', 'Falta anonimizar.py junto a app.py');
   } catch (err) { mensaje('#estado-anon', 'error', 'Abre la dirección completa que imprimió la terminal, con el token.'); }
 }
+let RAPIDO = null;
+const ETIQUETA_PASO = {pendiente: ['neutro', '· pendiente'], corriendo: ['info', '… en curso'], ok: ['ok', '✓ correcto'], aviso: ['aviso', '! aviso'], error: ['error', '× falló'], omitido: ['neutro', '– omitido']};
+function pintarPasos(t) {
+  const cont = $('#rap-pasos'); cont.textContent = '';
+  for (const paso of (t.pasos || [])) {
+    const fila = document.createElement('div'); fila.className = 'paso-fila';
+    const nombre = document.createElement('span'); nombre.className = 'paso-nombre'; nombre.textContent = paso.titulo;
+    const [tipo, txt] = ETIQUETA_PASO[paso.estado] || ETIQUETA_PASO.pendiente;
+    const resumen = document.createElement('span'); resumen.className = 'paso-resumen'; resumen.textContent = paso.resumen || '';
+    fila.appendChild(nombre); fila.appendChild(insignia(tipo, txt)); fila.appendChild(resumen); cont.appendChild(fila);
+  }
+  const salida = (t.pasos || []).filter(x => x.salida).map(x => '== ' + x.titulo + ' ==\n' + x.salida).join('\n\n');
+  $('#rap-detalles').classList.toggle('oculto', !salida); texto('#rap-salida', salida);
+}
+function pintarResultadoRapido(t) {
+  if (t.estado === 'error') { mensaje('#rap-estado', 'error', t.mensaje || 'No se creó ningún zip.'); $('#rap-revision').classList.add('oculto'); return; }
+  const nube = t.destino_sincronizado ? ' Ese destino está sincronizado con la nube (' + t.destino_sincronizado + '): el zip solo llegará allí ya revisado.' : '';
+  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube);
+  else mensaje('#rap-estado', t.estado === 'con avisos' ? 'aviso' : 'ok', (t.mensaje || '') + ' Zip: ' + t.zip);
+  $('#rap-revision').classList.toggle('oculto', !(t.zip && !t.revisado));
+}
+$('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
+$('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
+$('#btn-rapido').onclick = async () => {
+  const origen = $('#rap-origen').value.trim();
+  if (!origen) { mensaje('#rap-estado', 'aviso', 'Elige o escribe la carpeta del estudio.'); return; }
+  $('#btn-rapido').disabled = true; $('#rap-revision').classList.add('oculto'); $('#rap-visor').classList.add('oculto'); $('#rap-pasos').textContent = ''; $('#rap-detalles').classList.add('oculto');
+  const inicio = Date.now(); const reloj = () => { const s = Math.round((Date.now() - inicio) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  mensaje('#rap-estado', 'neutro', 'en curso · 00:00');
+  try {
+    const r = await api('rapido', {origen, destino: $('#rap-destino').value.trim()});
+    RAPIDO = r.trabajo;
+    const esperar = async () => {
+      const t = await api('trabajo/' + r.trabajo); pintarPasos(t);
+      if (t.estado === 'corriendo') { mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj()); return setTimeout(esperar, 800); }
+      texto('#rap-reloj', 'terminó en ' + reloj()); pintarResultadoRapido(t); $('#btn-rapido').disabled = false;
+      if (t.zip) cargarVisorCorrida(r.trabajo);
+      ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = [];
+    };
+    esperar();
+  } catch (err) { mensaje('#rap-estado', 'error', err.message); $('#btn-rapido').disabled = false; }
+};
+$('#btn-rap-revision').onclick = async () => {
+  const revisor = $('#rap-revisor').value.trim(), trabajo = RAPIDO;
+  if (!revisor) { mensaje('#rap-estado', 'aviso', 'Indica quién revisa antes de registrar.'); return; }
+  $('#btn-rap-revision').disabled = true;
+  try {
+    const r = await api('rapido/revision', {trabajo, revisor});
+    if (trabajo !== RAPIDO) return;
+    const pend = r.revision_pixeles_pendiente || [], resto = r.pendiente_anterior_no_eliminado || [], post = r.avisos_posteriores || [];
+    const tipo = (pend.length || r.avisos || resto.length || post.length) ? 'aviso' : 'ok';
+    mensaje('#rap-estado', tipo, r.mensaje + ' Zip: ' + r.zip + (pend.length ? ' Revisión de píxeles aún pendiente para: ' + pend.join(', ') + '.' : '') +
+      (resto.length ? ' No se pudo eliminar el zip pendiente de la carpeta de trabajo: ' + resto.join(', ') + '; bórralo a mano.' : '') +
+      (post.length ? ' El zip está publicado; quedaron avisos: ' + post.join('; ') + '.' : '') +
+      (r.destino_sincronizado ? ' El destino está sincronizado con la nube (' + r.destino_sincronizado + ').' : ''));
+    $('#rap-revision').classList.toggle('oculto', pend.length === 0);
+  } catch (err) { if (trabajo === RAPIDO) mensaje('#rap-estado', 'error', err.message); }
+  finally { $('#btn-rap-revision').disabled = false; }
+};
+let CORRIDA = {trabajo: null, series: [], indice: 0};
+function pintarCorteCorrida() {
+  const s = CORRIDA.series[CORRIDA.indice]; if (!s) return;
+  const k = Math.min(Math.max(parseInt($('#rap-deslizador').value, 10) || 1, 1), s.n);
+  $('#rap-corte').src = '/api/rapido/' + encodeURIComponent(CORRIDA.trabajo) + '/corte/' + CORRIDA.indice + '/' + k + '?ventana=' + encodeURIComponent($('#rap-ventana').value) + '&t=' + encodeURIComponent(T);
+  texto('#rap-etiqueta', 'corte ' + k + ' de ' + s.n + ' · ' + s.nombres[k - 1]);
+}
+function elegirSerieCorrida(i) {
+  CORRIDA.indice = i; const s = CORRIDA.series[i];
+  document.querySelectorAll('#rap-series button').forEach((b, j) => b.classList.toggle('primario', j === i));
+  const d = $('#rap-deslizador'); d.min = 1; d.max = s.n; d.value = 1;
+  $('#rap-ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
+  pintarDemografia('#rap-etiqueta-estudio', '#rap-aviso-demografia', s.demografia);
+  mensaje('#rap-orden', s.criterio === 'desempate determinista' ? 'aviso' : 'neutro', 'Cortes ordenados por ' + (s.criterio || 'InstanceNumber') + (s.aviso ? ': ' + s.aviso : '') + '.');
+  pintarCorteCorrida();
+}
+async function cargarVisorCorrida(trabajo) {
+  try {
+    const series = await api('rapido/' + trabajo + '/series');
+    if (trabajo !== RAPIDO) return;
+    CORRIDA = {trabajo, series, indice: 0};
+    const cont = $('#rap-series'); cont.textContent = '';
+    series.forEach((s, i) => { const b = document.createElement('button'); b.textContent = (s.modalidad || 'serie') + ' · ' + s.n + ' cortes · ' + s.serie.split('/').pop(); b.onclick = () => elegirSerieCorrida(i); cont.appendChild(b); });
+    $('#rap-visor').classList.toggle('oculto', series.length === 0);
+    if (series.length) elegirSerieCorrida(0);
+  } catch (err) { $('#rap-visor').classList.add('oculto'); }
+}
+$('#rap-deslizador').oninput = pintarCorteCorrida;
+$('#rap-ventana').onchange = pintarCorteCorrida;
+$('#rap-corte').onerror = () => texto('#rap-etiqueta', 'Este archivo cambió desde la corrida o no se puede mostrar; vuelve a ejecutar el modo rápido.');
 $('#btn-origen').onclick = async () => {
   const r = await api('elegir-carpeta', {});
   if (r.ruta) { $('#origen').value = r.ruta; mensaje('#aviso-origen', r.sincronizada ? 'aviso' : 'neutro', r.sincronizada ? 'Está dentro de una carpeta sincronizada (' + r.sincronizada + '). Se puede leer, pero conviene sacarla de la nube.' : 'Carpeta elegida.'); }
@@ -952,13 +1815,31 @@ $('#btn-anonimizar').onclick = async () => {
   } catch (err) { mensaje('#estado-anon', 'error', err.message); $('#btn-anonimizar').disabled = false; }
 };
 let SERIES = [], ACTUAL = null, ADSEQ = 0;
+function demografiaCorta(d) {
+  if (!d) return '';
+  const sexo = d.sexo.estado === 'registrado' ? d.sexo.valor : (d.sexo.estado === 'conflicto' ? 'sexo en conflicto' : 'sexo no registrado');
+  const e = d.edad_en_el_estudio;
+  const edad = e.estado === 'calculada' ? e.texto : (e.estado === 'informada' ? e.texto + ' (informada)' : 'edad no disponible');
+  return sexo + ' · ' + edad;
+}
+function avisosDemografia(d) {
+  if (!d) return [];
+  const e = d.edad_en_el_estudio, out = [];
+  if (e.estado === 'no_disponible') out.push('Edad no disponible: ' + e.motivo);
+  return out.concat(e.avisos || [], d.sexo.avisos || []);
+}
+function pintarDemografia(selEtiqueta, selAvisos, d) {
+  texto(selEtiqueta, d ? d.etiqueta : '');
+  const avisos = avisosDemografia(d);
+  mensaje(selAvisos, d && (d.sexo.estado === 'conflicto' || avisos.length) ? 'aviso' : 'neutro', avisos.length ? avisos.join('. ') + '.' : '');
+}
 async function cargarEstudios(refrescar) {
   SERIES = await api('estudios' + (refrescar ? '?refrescar=1' : ''));
   const tb = $('#tabla-series tbody'); tb.textContent = '';
   texto('#resumen-estudios', SERIES.length + ' series, ' + new Set(SERIES.map(s => s.paciente)).size + ' paciente(s)');
   for (const s of SERIES) {
     const tr = document.createElement('tr'); tr.className = 'fila-serie';
-    celda(tr, s.paciente); celda(tr, s.estudio); celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n, 'num');
+    celda(tr, s.paciente); celda(tr, demografiaCorta(s.demografia)); celda(tr, s.estudio); celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n, 'num');
     celda(tr, s.filas + '×' + s.columnas); const tdp = document.createElement('td'); tdp.appendChild(insignia(s.politica ? 'info' : 'error', s.politica || 'sin política')); tr.appendChild(tdp);
     tr.dataset.id = s.id; tr.onclick = () => abrir(s); tb.appendChild(tr);
   }
@@ -966,6 +1847,9 @@ async function cargarEstudios(refrescar) {
 }
 $('#btn-refrescar').onclick = () => cargarEstudios(1);
 function abrir(s) {
+  pintarDemografia('#etiqueta-estudio', '#aviso-demografia', s.demografia);
+  texto('#nota-orden', 'Cortes ordenados por ' + (s.orden_criterio || 'InstanceNumber') + '.');
+  mensaje('#aviso-orden', s.orden_criterio === 'desempate determinista' ? 'aviso' : 'neutro', s.orden_aviso ? 'Orden de los cortes: ' + s.orden_aviso + '.' : '');
   ACTUAL = s; $('#visor').classList.remove('oculto');
   document.querySelectorAll('#tabla-series tr.fila-serie').forEach(tr => tr.classList.toggle('seleccionada', tr.dataset.id === s.id));
   limpiarFormularioRevision(); cargarRevision(s.paciente); const d = $('#deslizador'); d.max = s.n - 1; d.value = Math.floor(s.n / 2);
@@ -1034,7 +1918,9 @@ $('#btn-verificar').onclick = async () => {
 $('#btn-empaquetar').onclick = async () => {
   const o = $('#salida-enviar'); o.classList.remove('oculto'); mensaje('#estado-enviar', 'neutro', 'verificando y empaquetando…'); texto('#salida-enviar', '');
   try { const r = await api('empaquetar', {pacientes: elegidos()}); const pend = r.revision_pixeles_pendiente || [];
-    mensaje('#estado-enviar', pend.length ? 'aviso' : 'ok', pend.length ? 'Paquete creado localmente, con revisión de píxeles pendiente para ' + pend.join(', ') + '. Existe, pero no está listo para compartirse.' : 'Paquete creado localmente con revisión de píxeles vigente y sin hallazgos en todos los pacientes.');
+    const sinOrden = r.orden_sin_verificar || [];
+    const notaOrden = sinOrden.length ? ' Orden de cortes no verificado en ' + sinOrden.length + ' serie(s): la numeración de esos archivos es un desempate, no un orden anatómico.' : '';
+    mensaje('#estado-enviar', (pend.length || sinOrden.length) ? 'aviso' : 'ok', (pend.length ? 'Paquete creado localmente, con revisión de píxeles pendiente para ' + pend.join(', ') + '. Existe, pero no está listo para compartirse.' : 'Paquete creado localmente con revisión de píxeles vigente y sin hallazgos en todos los pacientes.') + notaOrden);
     texto('#salida-enviar', r.ruta + '\n' + r.archivos + ' archivos de ' + r.pacientes.join(', ') + '\nIncluye manifiesto.json con el hash de cada archivo y el estado de la revisión. El mapa privado no entra.'); }
   catch (err) { mensaje('#estado-enviar', 'error', 'Rechazado: ' + err.message); texto('#salida-enviar', err.datos && err.datos.fallos ? Object.entries(err.datos.fallos).map(([p, s]) => p + ': ' + (Array.isArray(s) ? s.join('; ') : s)).join('\n') : ''); }
 };
