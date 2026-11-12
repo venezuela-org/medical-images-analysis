@@ -107,6 +107,15 @@ def main() -> int:
         estado, _ = api(a.puerto, token, "revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": ["rostro"], "revisor": "humo"})
         ok(estado == 400, "revisión contradictoria rechazada")
         estado, rev = api(a.puerto, token, "revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "humo"})
+        ok(estado == 409, "revisión 'sin hallazgos' rechazada mientras no se han mostrado todos los cortes")
+        estado, series_estudios = api(a.puerto, token, "estudios")
+        for serie_ in [x for x in series_estudios if x["paciente"] == pac]:      # lo que hace el navegador al recorrer las series
+            for i_ in range(serie_["n"]):
+                req_ = urllib.request.Request(f"http://127.0.0.1:{a.puerto}/api/serie/{serie_['id']}/corte/{i_}", headers={"X-Token": token})
+                urllib.request.urlopen(req_, timeout=60).read()
+                estado, avance = api(a.puerto, token, f"serie/{serie_['id']}/mostrado", {"i": i_})
+        ok(avance.get("completo") is True, "todos los cortes del paciente mostrados en Estudios")
+        estado, rev = api(a.puerto, token, "revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "humo"})
         ok(estado == 200 and rev.get("lista_para_compartir") is True, "revisión sin hallazgos registrada y vigente")
         estado, paq = api(a.puerto, token, "empaquetar", {"pacientes": [pac]})
         ok(estado == 200 and paq.get("revision_pixeles_pendiente") == [], "paquete creado con revisión vigente")
@@ -164,6 +173,15 @@ def main() -> int:
         ok(len(t.get("revision_pixeles_pendiente", [])) == 1, "el zip del modo rápido nace con la revisión de píxeles pendiente")
         with zipfile.ZipFile(t["zip"]) as z:
             contenido = set(z.namelist()) - {"manifiesto.json"}
+        estado, rv = api(a.puerto, token, "rapido/revision", {"trabajo": r["trabajo"], "revisor": "humo"})
+        ok(estado == 409 and "se han mostrado" in str(rv.get("detail")), "sello de revisión rechazado mientras no se han mostrado todos los cuadros")
+        for s_ in series:                                             # lo que hace el navegador al recorrer la corrida
+            for k_, cuadros_ in enumerate(s_["cuadros"], 1):
+                for c_ in range(1, cuadros_ + 1):
+                    req_ = urllib.request.Request(f"http://127.0.0.1:{a.puerto}/api/rapido/{r['trabajo']}/corte/{s_['indice']}/{k_}?cuadro={c_}", headers={"X-Token": token})
+                    urllib.request.urlopen(req_, timeout=60).read()
+                    estado, avance = api(a.puerto, token, f"rapido/{r['trabajo']}/mostrado", {"indice": s_["indice"], "k": k_, "cuadro": c_})
+        ok(avance.get("completo") is True, "todos los cuadros de la corrida mostrados en su visor")
         estado, rv = api(a.puerto, token, "rapido/revision", {"trabajo": r["trabajo"], "revisor": ""})
         ok(estado == 400, "sello de revisión sin revisor, rechazado")
         estado, rv = api(a.puerto, token, "rapido/revision", {"trabajo": r["trabajo"], "revisor": "humo"})
@@ -181,6 +199,14 @@ def main() -> int:
            and demo_m[0]["edad_en_el_estudio"]["estado"] == "calculada" and demo_m[0]["sexo"]["estado"] == "registrado",
            "el manifiesto lleva la demografía del estudio: " + (demo_m[0]["etiqueta"] if demo_m else "ausente"))
         ok("19600615" not in json.dumps(m2) and "20240305" not in json.dumps(m2), "el manifiesto no lleva la fecha de nacimiento ni la fecha original del estudio")
+        # retirar la revisión de la corrida: el registro se conserva, el zip no cambia, el paquete queda identificado
+        estado, lista = api(a.puerto, token, "revisiones")
+        corrida_ = next(c for c in lista["corridas"] if c["zip"]["nombre"] == Path(rv["zip"]).name)
+        huella_ = hashlib.sha256(Path(rv["zip"]).read_bytes()).hexdigest()
+        estado, ret = api(a.puerto, token, "revisiones/retirar", {"tipo": "corrida", "id": corrida_["registro"], "quien": "humo", "motivo": "prueba de retirada"})
+        ok(estado == 200 and ret["paquetes_afectados"][0]["ruta"] == rv["zip"] and ret["paquetes_afectados"][0]["existe"] is True,
+           "retirada de la revisión: el paquete revisado queda identificado")
+        ok(hashlib.sha256(Path(rv["zip"]).read_bytes()).hexdigest() == huella_, "retirar la revisión no cambia el zip ya exportado")
         print("prueba de humo del paquete: todo correcto")
         return 0
     finally:

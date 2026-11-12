@@ -241,9 +241,9 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|
 | Acentos, toda la cadena | Salida de las herramientas decodificada como UTF-8 (antes cp1252 en Windows: "polÃ­tica"); selector de carpetas en UTF-8 para rutas con acentos; app.js y app.css con charset; consola de Windows en UTF-8; todas las lecturas y escrituras de texto con encoding explícito |
 
-# Cambios 0.9.4 / Changes 0.9.4
+# Cambios 0.9.5 / Changes 0.9.5
 
-Las versiones 0.8.0 a 0.9.3 no se publicaron; sus cambios y los hallazgos de sus siete rondas de revisión están aquí.
+Las versiones 0.8.0 a 0.9.4 no se publicaron; sus cambios y los hallazgos de sus ocho rondas de revisión están aquí.
 
 | # | Hallazgo o cambio / Finding or change | Qué se hizo / What was done | Prueba / Test |
 |---|---|---|---|
@@ -268,3 +268,6 @@ Las versiones 0.8.0 a 0.9.3 no se publicaron; sus cambios y los hallazgos de sus
 | 19 | `--solo-lista` limitaba solo el lado limpio de la comparación de SUV; un original en cuarentena contaba como faltante | Con lista, la serie original son los originales de los archivos listados; sin lista, sin cambios | `test_un_pet_en_cuarentena_no_cuenta_como_faltante_en_el_suv_de_la_corrida` |
 | 20 | Una consulta de estado fallida dejaba el modo rápido colgado, con el botón deshabilitado | `seguirTrabajo()`: reintentos, mensaje, botón principal disponible y "Volver a consultar"; también en la limpieza de Entrada | Prueba de navegador: dos fallos seguidos y fallo sin parar |
 | 21 | La dirección de la aplicación se imprimía antes de que el servidor escuchara | Se imprime al terminar el índice de estudios | |
+| 22 | Una revisión registrada no se podía retirar sin borrar archivos a mano | "Retirar revisión" en Registro: quién, cuándo y por qué; el original se conserva (historial o en su sitio) y la retirada lo sustituye; el estado deja de valer; se enumeran los paquetes revisados afectados; los zips exportados no cambian | `test_retirar_la_revision_de_un_paciente_conserva_el_original_y_lo_sustituye`, `test_retirar_la_revision_de_una_corrida_no_toca_su_registro_ni_su_zip`, `test_retirar_exige_quien_y_por_que_y_algo_que_retirar`, `test_un_zip_que_ya_no_esta_o_que_cambio_se_dice` |
+| 23 | Se podía declarar "revisé todos los cortes" sin que los cortes hubieran estado en pantalla | Recuento de cuadros mostrados en el navegador, cada cuadro de cada archivo; las comprobaciones automáticas no cuentan; "sin hallazgos" exige el recuento completo y lo guarda junto a la declaración; se llama mostrado, no revisado | `test_las_comprobaciones_automaticas_no_cuentan_como_mostrado`, `test_solo_cuenta_lo_que_se_sirvio_al_visor_y_cada_cuadro_una_vez`, `test_sin_haber_mostrado_todo_no_se_puede_declarar_la_revision`, `test_cada_cuadro_de_un_archivo_con_varios_cuenta`, `test_revision_clasica_por_la_api_exige_mostrar_todos_los_cortes` |
+| 24 | Un registro de revisión se sobrescribía al registrar otro | Copia intacta en `historial_revisiones/` antes de cualquier sustitución | `test_una_revision_nueva_tras_una_retirada_conserva_todo_el_historial` |

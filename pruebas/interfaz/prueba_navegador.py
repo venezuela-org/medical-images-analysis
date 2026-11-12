@@ -124,9 +124,22 @@ def main() -> int:
             expect(pag.locator("#rev-sin")).to_be_disabled()
             expect(pag.locator("#rev-con")).to_be_enabled()
             pag.uncheck("#rev-rostro")
-            expect(pag.locator("#rev-sin")).to_be_enabled()
             expect(pag.locator("#rev-con")).to_be_disabled()
-            ok(True, "botones de revisión: deshabilitados sin revisor; con un hallazgo solo 'con hallazgos'; sin hallazgos solo 'sin hallazgos'")
+            expect(pag.locator("#rev-sin")).to_be_disabled()          # con nombre y sin hallazgos, pero aún no se ha mostrado todo
+            expect(pag.locator("#rev-progreso")).to_contain_text("de 16 cortes de este paciente")
+            ok(True, "botones de revisión: deshabilitados sin revisor; con un hallazgo solo 'con hallazgos'; 'sin hallazgos' espera a que se muestre todo")
+            # se recorren las dos series con "Recorrer la serie": cada corte pasa por la pantalla
+            for modalidad_ in ("CT", "PT"):
+                modalidad(modalidad_).click()
+                expect(pag.locator("#visor")).not_to_have_class(re.compile(r"\boculto\b"))
+                pag.eval_on_selector("#deslizador", "el => { el.value = 0; el.dispatchEvent(new Event('input', {bubbles: true})); }")
+                pag.click("#btn-recorrer")
+                expect(pag.locator("#rev-progreso")).to_contain_text("8 de 8 en esta serie", timeout=60000)
+            expect(pag.locator("#rev-progreso")).to_contain_text("16 de 16 cortes de este paciente")
+            expect(pag.locator("#rev-progreso")).to_contain_text("Mostrado no significa revisado")
+            pag.fill("#rev-revisor", "prueba")
+            expect(pag.locator("#rev-sin")).to_be_enabled()
+            ok(True, "Estudios: tras mostrar los 16 cortes del paciente, 'sin hallazgos' se habilita; el recuento se llama mostrado, no revisado")
             pag.click("#rev-sin")
             expect(pag.locator("#rev-estado")).to_contain_text("sin hallazgos, vigente", timeout=30000)
             ok(True, "revisión sin hallazgos registrada y vigente")
@@ -180,6 +193,15 @@ def main() -> int:
             expect(pag.locator("#rap-orden")).to_contain_text("Cortes ordenados por InstanceNumber")
             expect(pag.locator("#rap-etiqueta-estudio")).to_have_text("ANON-0001 · O · 63 años en el estudio")
             ok(True, "modo rápido: el visor de la corrida muestra las dos series, con el nombre exportado de cada corte")
+            expect(pag.locator("#btn-rap-revision")).to_be_disabled()   # todavía no se han mostrado todos los cuadros
+            expect(pag.locator("#rap-progreso")).to_contain_text("de 16 cuadros de la corrida")
+            for n_ in range(2):                                     # se recorren las dos series de la corrida
+                pag.locator("#rap-series button").nth(n_).click()
+                pag.click("#btn-rap-recorrer")
+                expect(pag.locator("#rap-progreso")).to_contain_text("8 de 8 en esta serie", timeout=60000)
+            expect(pag.locator("#rap-progreso")).to_contain_text("16 de 16 cuadros de la corrida")
+            expect(pag.locator("#btn-rap-revision")).to_be_enabled()
+            ok(True, "modo rápido: el botón de la revisión se habilita solo cuando los 16 cuadros han estado en pantalla")
             pag.click("#btn-rap-revision")                      # sin nombre: no registra
             expect(pag.locator("#rap-estado")).to_contain_text("Indica quién revisa")
             pag.fill("#rap-revisor", "prueba")
@@ -188,6 +210,25 @@ def main() -> int:
             expect(pag.locator("#rap-estado .mensaje")).to_have_class(re.compile(r"\bok\b"))
             expect(pag.locator("#rap-revision")).to_have_class(re.compile(r"\boculto\b"))
             ok(True, "modo rápido: el sello de revisión deja el zip en el destino y oculta los controles")
+
+            # retirar la revisión de la corrida desde Registro: con nombre y motivo; el original se conserva
+            pag.click("nav.pestanas button[data-tab=registro]")
+            fila = lambda alcance: pag.locator("#tabla-revisiones tbody tr").filter(has=pag.locator("td:first-child", has_text=alcance))
+            fila_corrida = fila("Corrida ·")
+            expect(fila_corrida).to_have_count(1)
+            fila_corrida.locator("button", has_text="Retirar").click()
+            pag.click("#btn-retirar")                               # sin nombre ni motivo: no retira
+            expect(pag.locator("#retirada-resultado")).to_contain_text("Indica quién retira la revisión y por qué")
+            pag.fill("#retirar-quien", "prueba")
+            pag.fill("#retirar-motivo", "registrada en una prueba automática")
+            pag.click("#btn-retirar")
+            expect(pag.locator("#retirada-resultado")).to_contain_text("Revisión retirada", timeout=30000)
+            expect(pag.locator("#retirada-resultado")).to_contain_text("ya no deben compartirse")
+            expect(pag.locator("#retirada-resultado")).to_contain_text("Retirar no cambia los zips ya exportados")
+            expect(fila("Corrida ·")).to_contain_text("retirada el")
+            expect(fila("Paciente ·")).to_contain_text("revisión retirada")
+            ok(True, "Registro: retirar la revisión de la corrida deja constancia de quién y por qué, y señala el paquete afectado")
+            pag.click("nav.pestanas button[data-tab=rapido]")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-0-rapido.png"), full_page=True)
 
             # consulta de estado que falla sin parar: mensaje claro, botón principal disponible y recuperación a petición

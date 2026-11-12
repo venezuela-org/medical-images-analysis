@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -596,7 +596,10 @@ def trabajo(request: Request, tid: str):
         t["indexado"] = True
         rep = carpeta_reportes() / "ultimo_reporte.md"
         t["reporte"] = rep.read_text(encoding="utf-8") if rep.exists() else ""
-    return {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida")}
+    out = {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida", "servidos", "mostrados")}
+    if t.get("nombre") == "rapido" and t.get("zip"):
+        out["progreso"] = progreso_corrida(t)
+    return out
 
 
 @api.get("/estudios")
@@ -614,13 +617,38 @@ def corte(request: Request, sid: str, i: int, ventana: str = "tejido", cuadro: i
     if not s:
         raise HTTPException(404, "serie desconocida")
     i = max(0, min(i, s["n"] - 1))
+    ruta = s["cortes"][i][1]
+    firma = _firma_archivo(ruta)
     try:
-        png = render_bytes(Path(s["cortes"][i][1]).read_bytes(), ventana, cuadro)
+        png = render_bytes(Path(ruta).read_bytes(), ventana, cuadro)
     except ImagenNoMostrable as e:
         raise HTTPException(422, f"este corte no se puede mostrar: {e}")
     except Exception as e:
         raise HTTPException(500, f"no se pudo renderizar el corte: {type(e).__name__}")
+    MOSTRADOS_ESTUDIOS.setdefault(s["paciente"], {"servidos": set(), "mostrados": set()})["servidos"].add((ruta, firma, cuadro))
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@api.post("/serie/{sid}/mostrado")
+def serie_mostrado(request: Request, sid: str, cuerpo: dict):
+    """El navegador avisa de que un corte de Estudios ha estado en pantalla."""
+    auth(request)
+    s = INDICE.get(sid)
+    if not s:
+        raise HTTPException(404, "serie desconocida")
+    try:
+        i, cuadro = int(cuerpo.get("i")), int(cuerpo.get("cuadro", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "i y cuadro deben ser números")
+    if not 0 <= i < s["n"]:
+        raise HTTPException(404, "corte fuera de rango")
+    ruta = s["cortes"][i][1]
+    estado = MOSTRADOS_ESTUDIOS.setdefault(s["paciente"], {"servidos": set(), "mostrados": set()})
+    clave = (ruta, _firma_archivo(ruta), cuadro)
+    if clave not in estado["servidos"]:
+        raise HTTPException(409, "ese corte no se ha servido al visor")
+    estado["mostrados"].add(clave)
+    return progreso_paciente(s["paciente"])
 
 
 def verificar_pacientes(pacientes: list[str]) -> tuple[dict, dict]:
@@ -1163,6 +1191,57 @@ def corrida_con_zip(tid: str) -> dict:
     return t
 
 
+# --------------------------------------------------------------------------------------
+# avance de la revisión: cuadros MOSTRADOS en el navegador
+# --------------------------------------------------------------------------------------
+# Se cuenta un cuadro cuando el navegador avisa de que lo ha tenido en pantalla, y solo si antes se sirvió al visor por
+# HTTP. Las comprobaciones automáticas de que una imagen se puede dibujar no pasan por ahí y no cuentan. "Mostrado" no
+# significa "revisado": la revisión sigue siendo la declaración de quien firma. El recuento solo impide declarar
+# "revisé todos los cortes" cuando no todos han llegado a estar en pantalla.
+
+NOTA_MOSTRADO = "cuadros mostrados en el navegador; mostrado no significa revisado: la revisión es la declaración de quien firma"
+
+
+def progreso_corrida(t: dict) -> dict:
+    mostrados = t.get("mostrados") or set()
+    series = [{"indice": i, "total": sum(s_["cuadros"]), "mostrados": sum(1 for m in mostrados if m[0] == i)}
+              for i, s_ in enumerate(t.get("series_corrida") or [])]
+    total = sum(x["total"] for x in series)
+    return {"mostrados": len(mostrados), "total": total, "completo": total > 0 and len(mostrados) == total, "series": series, "nota": NOTA_MOSTRADO}
+
+
+def anotar_mostrado_corrida(t: dict, indice: int, k: int, cuadro: int) -> dict:
+    if (indice, k, cuadro) not in (t.get("servidos") or set()):
+        raise HTTPException(409, "ese cuadro no se ha servido al visor de esta corrida")
+    t.setdefault("mostrados", set()).add((indice, k, cuadro))
+    return progreso_corrida(t)
+
+
+MOSTRADOS_ESTUDIOS: dict[str, dict[str, set]] = {}      # paciente → {"servidos": {...}, "mostrados": {...}} de (ruta, firma, cuadro)
+
+
+def _firma_archivo(ruta: str) -> str:
+    """Tamaño y fecha de modificación: si el archivo cambia, lo ya mostrado deja de contar."""
+    try:
+        st = os.stat(ruta)
+        return f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        return "ausente"
+
+
+def progreso_paciente(pac: str) -> dict:
+    """Cortes del paciente (toda la serie guardada, un cuadro por archivo) que han estado en pantalla en Estudios."""
+    mostrados = (MOSTRADOS_ESTUDIOS.get(pac) or {}).get("mostrados") or set()
+    series, total, vistos = [], 0, 0
+    for sid, s_ in INDICE.items():
+        if s_["paciente"] != pac:
+            continue
+        n = sum(1 for _, ruta in s_["cortes"] if (ruta, _firma_archivo(ruta), 1) in mostrados)
+        series.append({"serie": sid, "total": s_["n"], "mostrados": n})
+        total, vistos = total + s_["n"], vistos + n
+    return {"mostrados": vistos, "total": total, "completo": total > 0 and vistos == total, "series": series, "nota": NOTA_MOSTRADO}
+
+
 def anotar_no_mostrable(t: dict, indice: int, k: int, cuadro: int, motivo: str) -> None:
     s_ = t["series_corrida"][indice]
     entrada = {"serie": s_["serie"], "archivo": s_["nombres"][k - 1], "cuadro": cuadro, "motivo": motivo}
@@ -1224,7 +1303,27 @@ def rapido_series(request: Request, tid: str):
 @api.get("/rapido/{tid}/corte/{indice}/{k}")
 def rapido_corte(request: Request, tid: str, indice: int, k: int, ventana: str = "tejido", cuadro: int = 1):
     auth(request)
-    return Response(png_de_corrida(corrida_con_zip(tid), indice, k, ventana, cuadro), media_type="image/png", headers={"Cache-Control": "no-store"})
+    t = corrida_con_zip(tid)
+    png = png_de_corrida(t, indice, k, ventana, cuadro)
+    t.setdefault("servidos", set()).add((indice, k, cuadro))       # servido al visor: el navegador podrá avisar de que lo mostró
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@api.post("/rapido/{tid}/mostrado")
+def rapido_mostrado(request: Request, tid: str, cuerpo: dict):
+    """El navegador avisa de que un cuadro ha estado en pantalla."""
+    auth(request)
+    try:
+        indice, k, cuadro = int(cuerpo.get("indice")), int(cuerpo.get("k")), int(cuerpo.get("cuadro", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "indice, k y cuadro deben ser números")
+    return anotar_mostrado_corrida(corrida_con_zip(tid), indice, k, cuadro)
+
+
+@api.get("/rapido/{tid}/progreso")
+def rapido_progreso(request: Request, tid: str):
+    auth(request)
+    return progreso_corrida(corrida_con_zip(tid))
 
 
 @api.post("/rapido")
@@ -1241,7 +1340,8 @@ def rapido(request: Request, cuerpo: dict):
     tid = secrets.token_hex(4)
     TRABAJOS[tid] = {"nombre": "rapido", "estado": "corriendo", "lineas": [], "codigo": None, "pasos": [], "pacientes": [],
                      "origen": str(origen), "destino": str(destino), "zip": None, "mensaje": "", "archivos": {}, "revisado": False,
-                     "exportacion": {}, "orden_de_cortes": {}, "series_corrida": [], "demografia": [], "no_mostrables": []}
+                     "exportacion": {}, "orden_de_cortes": {}, "series_corrida": [], "demografia": [], "no_mostrables": [],
+                     "servidos": set(), "mostrados": set()}
     threading.Thread(target=_rapido, args=(tid, origen, destino, prefijo), daemon=True).start()
     registrar("rápido: iniciado")
     return {"trabajo": tid, "destino": str(destino)}
@@ -1262,6 +1362,10 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
     error = validar_registro_revision("sin_hallazgos", [], revisor)
     if error:
         raise HTTPException(400, error)
+    avance = progreso_corrida(t)
+    if not avance["completo"]:
+        raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cuadros de esta corrida; "
+                                 "para declarar que se revisaron todos, todos tienen que haber estado en pantalla")
     if not CANDADO.acquire(blocking=False):
         raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de registrar la revisión")
     try:
@@ -1274,7 +1378,9 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         destino = validar_destino(Path(t["destino"]), Path(t["origen"]))
         fecha = dt.datetime.now().isoformat(timespec="seconds")
         revision = {"estado": "sin_hallazgos", "revisor": revisor, "fecha": fecha, "hallazgos": [],
-                    "detalle": "revisión registrada sobre el conjunto exacto de archivos de esta corrida"}
+                    "detalle": "revisión declarada por quien firma, sobre el conjunto exacto de archivos de esta corrida",
+                    "mostrado": {"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"],
+                                 "donde": "visor de la corrida, en el navegador", "nota": NOTA_MOSTRADO}}
         carpeta_reportes().mkdir(parents=True, exist_ok=True)
         registro_revision = carpeta_reportes() / f"revision_rapido_{dt.datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(2)}.json"
         registro_preparado = registro_revision.with_name(registro_revision.name + SUFIJO_PREPARADO)
@@ -1313,11 +1419,13 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         except OSError:
             registro_confirmado, registro_revision = False, registro_preparado
             avisos_posteriores.append(f"el registro de la revisión quedó con su nombre provisional aunque el zip está publicado: {registro_preparado}")
+        t["registro_revision"] = str(registro_revision)
         cubiertos = []
         for pac in t["pacientes"]:
             try:   # la revisión del paciente completo solo se actualiza si la corrida cubre todos sus archivos guardados
                 if set(hashes_paciente(pac)) == {rel.split("/", 1)[1] for rel in t["archivos"] if rel.startswith(pac + "/")}:
-                    guardar_revision(pac, "sin_hallazgos", [], revisor, "registrada desde el modo rápido; cubre todos los archivos del paciente")
+                    guardar_revision(pac, "sin_hallazgos", [], revisor, "registrada desde el modo rápido; cubre todos los archivos del paciente",
+                                     origen={"corrida": Path(registro_revision).name}, mostrado=revision["mostrado"])
                     cubiertos.append(pac)
             except Exception as e:
                 avisos_posteriores.append(f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); el zip publicado y su registro no cambian")
@@ -1585,6 +1693,11 @@ def validar_registro_revision(estado: str, hallazgos: list, revisor: str) -> str
 def evaluar_registro_revision(r: dict, actuales: dict[str, str]) -> dict:
     """Estado efectivo de un registro frente a los archivos actuales. Cualquier hallazgo registrado cuenta como pendiente,
     diga lo que diga la etiqueta; un registro contradictorio también."""
+    if r.get("estado") == "retirada":
+        ret = r.get("retirada") or {}
+        return {"paciente": r.get("paciente"), "estado": "retirada", "vigente": False, "lista_para_compartir": False,
+                "detalle": f"revisión retirada el {ret.get('fecha', '')} por {ret.get('quien', '')}: {ret.get('motivo', '')}",
+                "retirada": ret, "sustituye_a": r.get("sustituye_a"), "paquetes_afectados": r.get("paquetes_afectados", [])}
     vigente = actuales == r.get("archivos", {})
     r2 = {k: v for k, v in r.items() if k != "archivos"}
     r2["archivos_revisados"] = len(r.get("archivos", {}))
@@ -1614,8 +1727,26 @@ def leer_revision(pac: str) -> dict:
     return evaluar_registro_revision(r, hashes_paciente(pac))
 
 
-def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "") -> dict:
-    """Escribe el registro de revisión de píxeles de un paciente, ligado a los hashes de sus archivos."""
+def archivar_registro(ruta: Path) -> dict | None:
+    """Antes de sustituir un registro de revisión, guarda una copia intacta en historial_revisiones/. Devuelve su referencia
+    (archivo y sha256) o None si no había registro. Ningún registro de revisión se sobrescribe sin dejar esa copia."""
+    if not ruta.exists():
+        return None
+    datos = ruta.read_bytes()
+    huella = hashlib.sha256(datos).hexdigest()
+    historial = carpeta_reportes() / "historial_revisiones"
+    historial.mkdir(parents=True, exist_ok=True)
+    copia = historial / f"{ruta.stem}_{dt.datetime.now():%Y%m%d_%H%M%S}_{huella[:8]}.json"
+    copia.write_bytes(datos)
+    if hashlib.sha256(copia.read_bytes()).hexdigest() != huella:
+        raise OSError("la copia del registro en el historial no coincide con el original")
+    return {"archivo": f"historial_revisiones/{copia.name}", "sha256": huella}
+
+
+def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "",
+                     origen: dict | None = None, mostrado: dict | None = None) -> dict:
+    """Escribe el registro de revisión de píxeles de un paciente, ligado a los hashes de sus archivos. El registro
+    anterior, si lo hay, queda intacto en el historial."""
     try:
         politica = json.loads((TRABAJO / "limpios" / ".politica.json").read_text(encoding="utf-8")).get("politica", "")
     except (OSError, ValueError):
@@ -1623,17 +1754,206 @@ def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, 
     registro = {"paciente": pac, "estado": estado, "hallazgos": hallazgos, "notas": notas, "revisor": revisor,
                 "fecha": dt.datetime.now().isoformat(timespec="seconds"), "app": VERSION, "politica": politica,
                 "archivos": hashes_paciente(pac)}
+    if origen:
+        registro["origen"] = origen
+    if mostrado:
+        registro["mostrado"] = mostrado
     carpeta_reportes().mkdir(parents=True, exist_ok=True)
-    (carpeta_reportes() / f"revision_pixeles_{pac}.json").write_text(json.dumps(registro, ensure_ascii=False, indent=2), encoding="utf-8")
+    ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
+    anterior = archivar_registro(ruta)
+    if anterior:
+        registro["registro_anterior"] = anterior
+    _escribir_json(ruta, registro)
     registrar(f"revisión de píxeles: {pac} → {estado} ({len(registro['archivos'])} archivos)")
     return leer_revision(pac)
+
+
+# --------------------------------------------------------------------------------------
+# retirar una revisión registrada
+# --------------------------------------------------------------------------------------
+# Retirar no borra nada. El registro original queda intacto (en el historial, para los de paciente; en su sitio, para
+# los de una corrida) y un registro de retirada lo sustituye, con quién, cuándo y por qué. La retirada invalida el
+# estado de la revisión dentro de la aplicación e identifica los paquetes revisados que dependían de ella. No puede
+# cambiar los zips ya exportados: los enumera, para que no se compartan.
+
+REGISTRO_RAPIDO_RE = re.compile(r"^revision_rapido_\d{8}_\d{6}_[0-9a-f]{4}\.json$")
+NOTA_RETIRADA = ("Retirar una revisión invalida su estado en la aplicación. No modifica ni elimina los zips ya exportados: "
+                 "los paquetes enumerados aquí se crearon con esa revisión y ya no deben compartirse.")
+
+
+def paquetes_revisados_de(pacientes: set[str], zip_de_corrida: dict | None = None) -> list[dict]:
+    """Paquetes revisados, según sus manifiestos locales, que contienen a alguno de estos pacientes; más el zip de la
+    corrida indicada. De cada uno: nombre, destino, si sigue existiendo allí y si sigue siendo el mismo archivo."""
+    encontrados: dict[str, dict] = {}
+    carpeta = TRABAJO / "paquetes"
+    for manifiesto in sorted(carpeta.glob("paquete_*.manifiesto.json")) if carpeta.is_dir() else []:
+        try:
+            m = json.loads(manifiesto.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        en_paquete = set(m.get("pacientes", [])) & pacientes
+        revisados = en_paquete - set(m.get("revision_pixeles_pendiente", []))
+        if not revisados:
+            continue
+        z = m.get("zip") or {}
+        nombre = z.get("nombre") or manifiesto.name.replace(".manifiesto.json", ".zip")
+        encontrados[nombre] = {"zip": nombre, "destino": z.get("destino") or str(carpeta), "sha256": z.get("sha256"),
+                               "creado": m.get("creado"), "pacientes": sorted(revisados)}
+    if zip_de_corrida and zip_de_corrida.get("nombre"):
+        encontrados.setdefault(zip_de_corrida["nombre"], {"zip": zip_de_corrida["nombre"], "destino": zip_de_corrida.get("destino"),
+                                                          "sha256": zip_de_corrida.get("sha256"), "creado": None, "pacientes": sorted(pacientes)})
+    out = []
+    for e in encontrados.values():
+        ruta = Path(e["destino"] or "") / e["zip"]
+        existe = ruta.is_file()
+        try:
+            mismo = bool(existe and e["sha256"] and sha256_archivo(ruta) == e["sha256"])
+        except OSError:
+            mismo = False
+        out.append({**e, "ruta": str(ruta), "existe": existe, "es_el_mismo_archivo": mismo if e["sha256"] else None})
+    return sorted(out, key=lambda e: e["zip"])
+
+
+def _retirada_de_corrida(nombre: str) -> Path:
+    return carpeta_reportes() / (nombre[:-5] + ".retirada.json")
+
+
+def _retirar_registro_de_paciente(pac: str, quien: str, motivo: str, fecha: str) -> dict | None:
+    """Sustituye el registro vigente del paciente por una retirada; el original queda intacto en el historial."""
+    ruta = carpeta_reportes() / f"revision_pixeles_{pac}.json"
+    try:
+        original = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if original.get("estado") not in ("sin_hallazgos", "con_hallazgos"):
+        return None
+    referencia = archivar_registro(ruta)
+    paquetes = paquetes_revisados_de({pac})
+    retirada = {"paciente": pac, "estado": "retirada", "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo},
+                "sustituye_a": {**referencia, "estado": original.get("estado"), "revisor": original.get("revisor"), "fecha": original.get("fecha"),
+                                "archivos": len(original.get("archivos", {})), "origen": original.get("origen")},
+                "paquetes_afectados": paquetes, "nota": NOTA_RETIRADA, "app": VERSION}
+    _escribir_json(ruta, retirada)
+    registrar(f"revisión de píxeles: {pac} → retirada por {quien}; {len(paquetes)} paquete(s) revisado(s) afectados")
+    return retirada
+
+
+def _retirar_registro_de_corrida(nombre: str, quien: str, motivo: str, fecha: str) -> dict | None:
+    """Escribe la retirada junto al registro de la corrida, que no se toca."""
+    ruta = carpeta_reportes() / nombre
+    destino = _retirada_de_corrida(nombre)
+    if not ruta.is_file() or destino.exists():
+        return None
+    datos = ruta.read_bytes()
+    try:
+        original = json.loads(datos.decode("utf-8"))
+    except ValueError:
+        return None
+    paquetes = paquetes_revisados_de(set(original.get("pacientes", [])), original.get("zip"))
+    paquetes = [e for e in paquetes if e["zip"] == (original.get("zip") or {}).get("nombre")] or paquetes
+    retirada = {"tipo": "retirada de la revisión de una corrida", "registro": nombre, "sha256_registro": hashlib.sha256(datos).hexdigest(),
+                "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo}, "pacientes": original.get("pacientes", []),
+                "archivos": len(original.get("archivos", {})), "revisor": original.get("revisor"), "fecha_revision": original.get("fecha"),
+                "paquetes_afectados": paquetes, "nota": NOTA_RETIRADA, "app": VERSION}
+    _escribir_json(destino, retirada)
+    for t in TRABAJOS.values():                                    # la corrida abierta en pantalla, si es esta
+        if t.get("nombre") == "rapido" and Path(str(t.get("registro_revision", ""))).name == nombre:
+            t["revision_retirada"] = retirada["retirada"]
+    registrar(f"revisión de la corrida {nombre} → retirada por {quien}; {len(paquetes)} paquete(s) afectado(s)")
+    return retirada
+
+
+def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> dict:
+    """Retira la revisión de un paciente o la de una corrida. Lo que cuelga de ella se retira a la vez: la revisión de
+    paciente que escribió una corrida, y la de la corrida de la que salió una revisión de paciente."""
+    quien, motivo = quien.strip()[:120], motivo.strip()[:1000]
+    if not quien:
+        raise HTTPException(400, "indica quién retira la revisión")
+    if len(motivo) < 3:
+        raise HTTPException(400, "indica por qué se retira la revisión")
+    if not CANDADO.acquire(blocking=False):
+        raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de retirar una revisión")
+    try:
+        fecha = dt.datetime.now().isoformat(timespec="seconds")
+        retiradas = []
+        if tipo == "paciente":
+            carpeta_paciente(identificador)
+            r = _retirar_registro_de_paciente(identificador, quien, motivo, fecha)
+            if r is None:
+                raise HTTPException(409, "ese paciente no tiene una revisión registrada que retirar")
+            retiradas.append({**r, "tipo": "paciente", "id": identificador})
+            corrida = ((r["sustituye_a"].get("origen") or {}).get("corrida") or "")
+            if REGISTRO_RAPIDO_RE.match(corrida):
+                rc = _retirar_registro_de_corrida(corrida, quien, f"se retiró la revisión de {identificador}: {motivo}", fecha)
+                if rc:
+                    retiradas.append({**rc, "tipo": "corrida", "id": corrida})
+        elif tipo == "corrida":
+            if not REGISTRO_RAPIDO_RE.match(identificador):
+                raise HTTPException(400, "identificador de corrida no válido")
+            rc = _retirar_registro_de_corrida(identificador, quien, motivo, fecha)
+            if rc is None:
+                raise HTTPException(409, "esa corrida no tiene una revisión registrada que retirar, o ya está retirada")
+            retiradas.append({**rc, "tipo": "corrida", "id": identificador})
+            for pac in rc["pacientes"]:                              # las revisiones de paciente que escribió esta corrida
+                try:
+                    actual = json.loads((carpeta_reportes() / f"revision_pixeles_{pac}.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if (actual.get("origen") or {}).get("corrida") == identificador:
+                    rp = _retirar_registro_de_paciente(pac, quien, f"se retiró la revisión de la corrida {identificador}: {motivo}", fecha)
+                    if rp:
+                        retiradas.append({**rp, "tipo": "paciente", "id": pac})
+        else:
+            raise HTTPException(400, "tipo debe ser paciente o corrida")
+        paquetes = {e["zip"]: e for r in retiradas for e in r["paquetes_afectados"]}
+        return {"retiradas": [{"tipo": r["tipo"], "id": r["id"]} for r in retiradas], "quien": quien, "fecha": fecha, "motivo": motivo,
+                "paquetes_afectados": sorted(paquetes.values(), key=lambda e: e["zip"]), "nota": NOTA_RETIRADA}
+    finally:
+        CANDADO.release()
+
+
+def revisiones_registradas() -> dict:
+    """Lo que hay registrado: la revisión de cada paciente y la de cada corrida, con su estado y los paquetes afectados."""
+    carpeta = carpeta_reportes()
+    pacientes, corridas = [], []
+    for ruta in sorted(carpeta.glob("revision_pixeles_*.json")) if carpeta.is_dir() else []:
+        pac = ruta.stem.replace("revision_pixeles_", "")
+        if not PACIENTE_RE.match(pac) or not (TRABAJO / "limpios" / pac).is_dir():
+            continue
+        r = leer_revision(pac)
+        pacientes.append({"paciente": pac, "estado": r.get("estado"), "vigente": r.get("vigente"), "detalle": r.get("detalle"),
+                          "revisor": r.get("revisor"), "fecha": r.get("fecha"), "archivos": r.get("archivos_revisados"),
+                          "origen": r.get("origen"), "retirada": r.get("retirada"), "paquetes_afectados": r.get("paquetes_afectados", []),
+                          "se_puede_retirar": r.get("estado") in ("sin_hallazgos", "con_hallazgos") or r.get("detalle", "").startswith("invalidada")})
+    for ruta in sorted(carpeta.glob("revision_rapido_*.json")) if carpeta.is_dir() else []:
+        if not REGISTRO_RAPIDO_RE.match(ruta.name):
+            continue
+        try:
+            r = json.loads(ruta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        retirada = None
+        try:
+            retirada = json.loads(_retirada_de_corrida(ruta.name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        z = r.get("zip") or {}
+        zip_ruta = Path(z.get("destino") or "") / (z.get("nombre") or "")
+        corridas.append({"registro": ruta.name, "revisor": r.get("revisor"), "fecha": r.get("fecha"), "pacientes": r.get("pacientes", []),
+                         "archivos": len(r.get("archivos", {})), "mostrado": r.get("mostrado"),
+                         "zip": {"nombre": z.get("nombre"), "destino": z.get("destino"), "existe": zip_ruta.is_file() if z.get("nombre") else False},
+                         "retirada": (retirada or {}).get("retirada"), "paquetes_afectados": (retirada or {}).get("paquetes_afectados", []),
+                         "se_puede_retirar": retirada is None})
+    return {"pacientes": pacientes, "corridas": corridas, "nota": NOTA_RETIRADA}
 
 
 @api.get("/revision/{pac}")
 def revision(request: Request, pac: str):
     auth(request)
     carpeta_paciente(pac)
-    return leer_revision(pac)
+    if not INDICE:
+        indexar()
+    return {**leer_revision(pac), "progreso": progreso_paciente(pac)}
 
 
 @api.post("/revision")
@@ -1654,7 +1974,26 @@ def registrar_revision(request: Request, cuerpo: dict):
         if any(s_["paciente"] == pac and s_.get("cuadros_max", 1) > 1 for s_ in INDICE.values()):
             raise HTTPException(409, "este paciente tiene archivos con varios cuadros y la pestaña Estudios muestra uno por archivo; "
                                      "para registrar 'sin hallazgos' recorre todos los cuadros en el visor de una corrida del modo rápido")
+        avance = progreso_paciente(pac)
+        if not avance["completo"]:
+            raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cortes de este paciente; "
+                                     "para declarar 'sin hallazgos', todos tienen que haber estado en pantalla")
+        mostrado = {"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"], "donde": "pestaña Estudios, en el navegador", "nota": NOTA_MOSTRADO}
+        return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado)
     return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
+
+
+@api.get("/revisiones")
+def revisiones(request: Request):
+    auth(request)
+    return revisiones_registradas()
+
+
+@api.post("/revisiones/retirar")
+def retirar(request: Request, cuerpo: dict):
+    """Retira una revisión registrada, de un paciente o de una corrida, con quién y por qué. No borra ningún registro."""
+    auth(request)
+    return retirar_revision(str(cuerpo.get("tipo", "")), str(cuerpo.get("id", "")), str(cuerpo.get("quien", "")), str(cuerpo.get("motivo", "")))
 
 
 @api.get("/registro")
@@ -1688,7 +2027,7 @@ HTML = """<!doctype html>
   <div id="rap-pasos" class="pasos"></div>
   <div id="rap-revision" class="oculto">
     <div class="fila"><input type="text" id="rap-revisor" placeholder="quien revisa" class="corto"><button id="btn-rap-revision">Revisé todos los cortes: sin hallazgos</button></div>
-    <p class="terciario">Recorre aquí abajo todos los cortes de todas las series antes de registrar. La revisión vale para los archivos exactos de esta corrida: si alguno cambia, hay que repetirla. Al registrar, el zip revisado se escribe en el destino y el pendiente se elimina de la carpeta de trabajo.</p>
+    <p class="terciario">Recorre aquí abajo todos los cortes de todas las series antes de registrar: el botón se habilita cuando todos han estado en pantalla en este navegador. Que un corte se haya mostrado no significa que esté revisado: la revisión es tu declaración. Vale para los archivos exactos de esta corrida: si alguno cambia, hay que repetirla. Al registrar, el zip revisado se escribe en el destino y el pendiente se elimina de la carpeta de trabajo.</p>
   </div>
   <div id="rap-visor" class="oculto">
     <h3>Los archivos de este paquete, en su orden</h3>
@@ -1700,6 +2039,8 @@ HTML = """<!doctype html>
         <div id="rap-cuadros" class="oculto"><label class="terciario" for="rap-cuadro">Cuadros de este archivo</label><input type="range" id="rap-cuadro" min="1" max="1" value="1"></div>
         <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label></div>
         <p id="rap-etiqueta" class="mono"></p>
+        <div class="fila"><button id="btn-rap-recorrer">Recorrer la serie</button></div>
+        <p id="rap-progreso" class="terciario"></p>
         <div id="rap-orden"></div></div></div>
   </div>
   <details id="rap-detalles" class="oculto"><summary>Salida de cada paso</summary><pre id="rap-salida" class="salida"></pre></details>
@@ -1724,7 +2065,8 @@ HTML = """<!doctype html>
     <div><div class="lienzo"><img id="corte" alt="corte"></div><input type="range" id="deslizador" min="0" max="0" value="0">
       <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><span id="pos" class="terciario"></span></div>
       <p class="terciario"><span id="nota-orden">Cortes ordenados por InstanceNumber.</span> Vista previa sin escala cuantitativa; el SUV se calcula en las comprobaciones, no aquí. Al exportar, los archivos se numeran con este mismo orden.</p>
-      <div id="aviso-orden"></div></div>
+      <div id="aviso-orden"></div>
+      <div class="fila"><button id="btn-recorrer">Recorrer la serie</button><span id="rev-progreso" class="terciario"></span></div></div>
     <div><p id="etiqueta-estudio" class="etiqueta-estudio"></p><div id="aviso-demografia"></div><div class="meta" id="meta"></div>
       <h3 style="margin-top:16px">Comprobaciones</h3>
       <div class="fila" id="botones-comprobar"><button data-que="emparejar">Emparejar CT + PET</button><button data-que="cotejar">Cotejar con el original</button><button data-que="suv">SUV de esta serie</button><button data-que="comparar_suv">Comparar SUV original / limpio</button></div>
@@ -1736,7 +2078,7 @@ HTML = """<!doctype html>
         <div class="fila"><label><input type="checkbox" id="rev-texto"> texto grabado</label><label><input type="checkbox" id="rev-rostro"> rostro identificable</label><label><input type="checkbox" id="rev-otro"> otro identificador visible</label></div>
         <div class="fila"><input type="text" id="rev-revisor" placeholder="quien revisa" class="corto"><input type="text" id="rev-notas" placeholder="notas (opcional)"></div>
         <div class="fila"><button id="rev-sin">Registrar: revisada, sin hallazgos</button><button id="rev-con">Registrar: con hallazgos</button></div>
-        <p class="terciario">La revisión queda ligada a los hashes exactos de los archivos del paciente; si cambian, pasa a pendiente. Revisar toda la serie, no solo algunos cortes.</p>
+        <p class="terciario">La revisión queda ligada a los hashes exactos de los archivos del paciente; si cambian, pasa a pendiente. Para registrar "sin hallazgos", todos los cortes de todas las series del paciente tienen que haber estado en pantalla en este navegador. Que un corte se haya mostrado no significa que esté revisado: la revisión es tu declaración.</p>
       </div></div>
   </div>
   <div class="antes-despues oculto" id="antes-despues">
@@ -1755,7 +2097,18 @@ HTML = """<!doctype html>
   <div id="estado-enviar"></div>
   <pre id="salida-enviar" class="salida oculto"></pre>
 </section>
-<section id="registro" class="pestana"><h2>Registro</h2><p class="terciario">Bitácora privada; se queda en la carpeta de trabajo. Rutas y seudónimos, nunca valores.</p><pre id="texto-registro" class="salida"></pre></section>
+<section id="registro" class="pestana">
+  <h2>Revisiones de píxeles registradas</h2>
+  <p class="suave">Una revisión se puede retirar: el registro original se conserva, y una retirada con tu nombre, la fecha y el motivo lo sustituye. Retirar no cambia los zips ya exportados; la lista de paquetes afectados dice cuáles ya no deben compartirse.</p>
+  <div id="revisiones-estado"></div>
+  <div class="tabla-marco"><table id="tabla-revisiones"><thead><tr><th>Alcance</th><th>Estado</th><th>Quién y cuándo</th><th>Archivos</th><th>Paquete</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div id="retirar-form" class="oculto">
+    <h3 id="retirar-titulo">Retirar revisión</h3>
+    <div class="fila"><input type="text" id="retirar-quien" placeholder="quien retira" class="corto"><input type="text" id="retirar-motivo" placeholder="motivo de la retirada"></div>
+    <div class="fila"><button id="btn-retirar" class="primario">Retirar esta revisión</button><button id="btn-retirar-cancelar">Cancelar</button></div>
+  </div>
+  <div id="retirada-resultado"></div>
+  <h2>Registro</h2><p class="terciario">Bitácora privada; se queda en la carpeta de trabajo. Rutas y seudónimos, nunca valores.</p><pre id="texto-registro" class="salida"></pre></section>
 </main>
 <script src="/static/app.js"></script></body></html>"""
 
@@ -1826,7 +2179,31 @@ function botonReintentar(sel, rotulo, alPulsar) {
   const cont = $(sel).querySelector('.mensaje') || $(sel); const b = document.createElement('button'); b.textContent = rotulo; b.className = 'reintentar';
   b.onclick = () => { b.disabled = true; alPulsar(); }; cont.appendChild(document.createTextNode(' ')); cont.appendChild(b);
 }
-let RAPIDO = null, BLOQUEO_REVISION = false;
+// Un cuadro cuenta como mostrado cuando su imagen se ha cargado, sigue siendo la que está en el visor un instante después
+// y la pestaña y la imagen están a la vista. Mostrado no es revisado.
+function alMostrar(img, avisar) {
+  img.addEventListener('load', () => {
+    const src = img.src;
+    setTimeout(() => {
+      if (img.src !== src || document.visibilityState !== 'visible' || !img.naturalWidth) return;
+      const r = img.getBoundingClientRect();
+      if (r.width === 0 || r.bottom <= 0 || r.top >= window.innerHeight) return;
+      avisar(src);
+    }, 120);
+  });
+}
+// Recorrer: avanza un paso cada vez que la imagen anterior ha terminado de cargarse y ha estado un instante en pantalla.
+function recorrido(boton, img, avanzar) {
+  let activo = false;
+  const parar = () => { activo = false; boton.textContent = 'Recorrer la serie'; };
+  const paso = () => { if (!activo) return; if (!avanzar()) parar(); };
+  img.addEventListener('load', () => { if (activo) setTimeout(paso, 160); });
+  img.addEventListener('error', parar);
+  // El corte que ya está en pantalla también tiene que cumplir su instante a la vista antes de pasar al siguiente.
+  boton.onclick = () => { if (activo) return parar(); activo = true; boton.textContent = 'Detener'; setTimeout(paso, 300); };
+  return parar;
+}
+let RAPIDO = null, BLOQUEO_REVISION = false, AVANCE_CORRIDA = null;
 const ETIQUETA_PASO = {pendiente: ['neutro', '· pendiente'], corriendo: ['info', '… en curso'], ok: ['ok', '✓ correcto'], aviso: ['aviso', '! aviso'], error: ['error', '× falló'], omitido: ['neutro', '– omitido']};
 function pintarPasos(t) {
   const cont = $('#rap-pasos'); cont.textContent = '';
@@ -1849,8 +2226,23 @@ function pintarResultadoRapido(t) {
   else mensaje('#rap-estado', t.estado === 'con avisos' ? 'aviso' : 'ok', (t.mensaje || '') + ' Zip: ' + t.zip);
   $('#rap-revision').classList.toggle('oculto', !(t.zip && !t.revisado));
   BLOQUEO_REVISION = ciegos.length > 0;
-  $('#btn-rap-revision').disabled = BLOQUEO_REVISION;
-  $('#btn-rap-revision').title = BLOQUEO_REVISION ? 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas' : '';
+  if (t.revision_retirada) mensaje('#rap-estado', 'aviso', 'La revisión de esta corrida se retiró el ' + t.revision_retirada.fecha + ' por ' + t.revision_retirada.quien + ': ' + t.revision_retirada.motivo + '. El zip ' + t.zip + ' ya no debe compartirse.');
+  pintarAvanceCorrida(t.progreso || AVANCE_CORRIDA);
+}
+function pintarAvanceCorrida(p) {
+  AVANCE_CORRIDA = p || null;
+  const completo = !!(p && p.completo);
+  if (p) {
+    const enSerie = (p.series || []).find(x => x.indice === CORRIDA.indice);
+    const completas = (p.series || []).filter(x => x.mostrados === x.total).length;
+    texto('#rap-progreso', 'Mostrados en este navegador: ' + p.mostrados + ' de ' + p.total + ' cuadros de la corrida' + (enSerie ? ' · ' + enSerie.mostrados + ' de ' + enSerie.total + ' en esta serie' : '') +
+      ' · ' + completas + ' de ' + (p.series || []).length + ' series completas. Mostrado no significa revisado.');
+    document.querySelectorAll('#rap-series button').forEach((b, j) => { const x = (p.series || [])[j]; if (x && b.dataset.rotulo) b.textContent = b.dataset.rotulo + ' · ' + x.mostrados + '/' + x.total; });
+  } else texto('#rap-progreso', '');
+  const b = $('#btn-rap-revision');
+  b.disabled = BLOQUEO_REVISION || !completo;
+  b.title = BLOQUEO_REVISION ? 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas'
+    : (completo ? '' : 'Se habilita cuando todos los cuadros de la corrida han estado en pantalla en este navegador');
 }
 $('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
@@ -1894,7 +2286,7 @@ $('#btn-rap-revision').onclick = async () => {
       (r.destino_sincronizado ? ' El destino está sincronizado con la nube (' + r.destino_sincronizado + ').' : ''));
     $('#rap-revision').classList.toggle('oculto', pend.length === 0);
   } catch (err) { if (trabajo === RAPIDO) mensaje('#rap-estado', 'error', err.message); }
-  finally { $('#btn-rap-revision').disabled = BLOQUEO_REVISION; }
+  finally { pintarAvanceCorrida(AVANCE_CORRIDA); }
 };
 let CORRIDA = {trabajo: null, series: [], indice: 0};
 function pintarCorteCorrida(conservarCuadro) {
@@ -1913,6 +2305,7 @@ function elegirSerieCorrida(i) {
   const d = $('#rap-deslizador'); d.min = 1; d.max = s.n; d.value = 1;
   $('#rap-ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
   pintarDemografia('#rap-etiqueta-estudio', '#rap-aviso-demografia', s.demografia);
+  pintarAvanceCorrida(AVANCE_CORRIDA);
   mensaje('#rap-orden', s.criterio === 'desempate determinista' ? 'aviso' : 'neutro', 'Cortes ordenados por ' + (s.criterio || 'InstanceNumber') + (s.aviso ? ': ' + s.aviso : '') + '.');
   pintarCorteCorrida(false);
 }
@@ -1922,11 +2315,24 @@ async function cargarVisorCorrida(trabajo) {
     if (trabajo !== RAPIDO) return;
     CORRIDA = {trabajo, series, indice: 0};
     const cont = $('#rap-series'); cont.textContent = '';
-    series.forEach((s, i) => { const b = document.createElement('button'); b.textContent = (s.modalidad || 'serie') + ' · ' + s.n + ' cortes · ' + s.serie.split('/').pop(); b.onclick = () => elegirSerieCorrida(i); cont.appendChild(b); });
+    series.forEach((s, i) => { const b = document.createElement('button'); b.dataset.rotulo = (s.modalidad || 'serie') + ' · ' + s.n + ' cortes · ' + s.serie.split('/').pop(); b.textContent = b.dataset.rotulo; b.onclick = () => elegirSerieCorrida(i); cont.appendChild(b); });
+    try { pintarAvanceCorrida(await api('rapido/' + trabajo + '/progreso')); } catch (err) { pintarAvanceCorrida(null); }
     $('#rap-visor').classList.toggle('oculto', series.length === 0);
     if (series.length) elegirSerieCorrida(0);
   } catch (err) { $('#rap-visor').classList.add('oculto'); }
 }
+alMostrar($('#rap-corte'), async src => {
+  const m = src.match(/\/api\/rapido\/([^/]+)\/corte\/(\d+)\/(\d+)\?.*?cuadro=(\d+)/); if (!m || decodeURIComponent(m[1]) !== RAPIDO) return;
+  try { const p = await api('rapido/' + m[1] + '/mostrado', {indice: Number(m[2]), k: Number(m[3]), cuadro: Number(m[4])}); if (decodeURIComponent(m[1]) === RAPIDO) pintarAvanceCorrida(p); }
+  catch (err) { /* el recuento se vuelve a pedir al cambiar de serie */ }
+});
+recorrido($('#btn-rap-recorrer'), $('#rap-corte'), () => {
+  const s = CORRIDA.series[CORRIDA.indice]; if (!s) return false;
+  const dc = $('#rap-cuadro'), d = $('#rap-deslizador');
+  if (!$('#rap-cuadros').classList.contains('oculto') && Number(dc.value) < Number(dc.max)) { dc.value = Number(dc.value) + 1; pintarCorteCorrida(true); return true; }
+  if (Number(d.value) >= s.n) return false;
+  d.value = Number(d.value) + 1; pintarCorteCorrida(false); return true;
+});
 $('#rap-deslizador').oninput = () => pintarCorteCorrida(false);
 $('#rap-cuadro').oninput = () => pintarCorteCorrida(true);
 $('#rap-ventana').onchange = () => pintarCorteCorrida(true);
@@ -2058,6 +2464,16 @@ async function antesDespues(i) {
   } catch (err) { mensaje('#ad-estado', 'error', err.message); }
 }
 $('#deslizador').oninput = mostrarCorte; $('#ventana').onchange = mostrarCorte;
+alMostrar($('#corte'), async src => {
+  const m = src.match(/\/api\/serie\/([^/]+)\/corte\/(\d+)\?/); if (!m || !ACTUAL || decodeURIComponent(m[1]) !== ACTUAL.id) return;
+  try { const p = await api('serie/' + m[1] + '/mostrado', {i: Number(m[2]), cuadro: 1}); if (ACTUAL && decodeURIComponent(m[1]) === ACTUAL.id) pintarAvancePaciente(p); }
+  catch (err) { /* el recuento se vuelve a pedir al abrir la serie */ }
+});
+recorrido($('#btn-recorrer'), $('#corte'), () => {
+  if (!ACTUAL) return false; const d = $('#deslizador');
+  if (Number(d.value) >= ACTUAL.n - 1) return false;
+  d.value = Number(d.value) + 1; mostrarCorte(); return true;
+});
 async function cargarPacientes() {
   if (!SERIES.length) SERIES = await api('estudios');
   const pacs = [...new Set(SERIES.map(s => s.paciente))]; const cont = $('#lista-pacientes'); cont.textContent = '';
@@ -2091,7 +2507,17 @@ document.querySelectorAll('#botones-comprobar button').forEach(b => b.onclick = 
   try { const r = await api('comprobar', {que: b.dataset.que, paciente: ACTUAL.paciente, serie: ACTUAL.id}); texto('#salida-comprobar', r.salida); }
   catch (err) { texto('#salida-comprobar', err.message); }
 });
+let AVANCE_PACIENTE = null;
+function pintarAvancePaciente(p) {
+  AVANCE_PACIENTE = p || null;
+  if (!p || !ACTUAL) { texto('#rev-progreso', ''); return; }
+  const enSerie = (p.series || []).find(x => x.serie === ACTUAL.id);
+  texto('#rev-progreso', 'Mostrados en este navegador: ' + p.mostrados + ' de ' + p.total + ' cortes de este paciente' + (enSerie ? ' · ' + enSerie.mostrados + ' de ' + enSerie.total + ' en esta serie' : '') + '. Mostrado no significa revisado.');
+  actualizarBotonesRevision();
+}
 function pintarRevision(r) {
+  if (r.progreso) pintarAvancePaciente(r.progreso);
+  if (r.estado === 'retirada') { mensaje('#rev-estado', 'aviso', 'Revisión de píxeles pendiente: ' + (r.detalle || 'revisión retirada') + '.'); return; }
   if (r.lista_para_compartir) mensaje('#rev-estado', 'ok', 'Revisión de píxeles: sin hallazgos, vigente. Registrada el ' + r.fecha + (r.revisor ? ' por ' + r.revisor : '') + ' sobre ' + r.archivos_revisados + ' archivos. La compuerta de metadatos se vuelve a comprobar al empaquetar.');
   else if (r.estado === 'con_hallazgos' && r.vigente) mensaje('#rev-estado', 'error', 'Revisión de píxeles: con hallazgos (' + (r.hallazgos || []).join(', ') + ') el ' + r.fecha + '. Requiere tratamiento antes de compartir.');
   else mensaje('#rev-estado', 'aviso', 'Revisión de píxeles pendiente: ' + (r.detalle || ''));
@@ -2099,7 +2525,12 @@ function pintarRevision(r) {
 let REVSEQ = 0;
 function limpiarFormularioRevision() { REVSEQ++; ['#rev-texto', '#rev-rostro', '#rev-otro'].forEach(s => { $(s).checked = false; }); $('#rev-notas').value = ''; mensaje('#rev-estado', 'neutro', 'cargando…'); $('#rev-sin').disabled = $('#rev-con').disabled = true; }
 function hallazgosMarcados() { return [['#rev-texto', 'texto_grabado'], ['#rev-rostro', 'rostro'], ['#rev-otro', 'otro']].filter(([s]) => $(s).checked).map(([, v]) => v); }
-function actualizarBotonesRevision() { if (REV_GUARDANDO) return; const h = hallazgosMarcados().length, rev = $('#rev-revisor').value.trim().length > 0; $('#rev-sin').disabled = h > 0 || !rev; $('#rev-con').disabled = h === 0 || !rev; }
+function actualizarBotonesRevision() {
+  if (REV_GUARDANDO) return; const h = hallazgosMarcados().length, rev = $('#rev-revisor').value.trim().length > 0;
+  const completo = !!(AVANCE_PACIENTE && AVANCE_PACIENTE.completo);
+  $('#rev-sin').disabled = h > 0 || !rev || !completo; $('#rev-con').disabled = h === 0 || !rev;
+  $('#rev-sin').title = completo ? '' : 'Se habilita cuando todos los cortes de todas las series de este paciente han estado en pantalla en este navegador';
+}
 ['#rev-texto', '#rev-rostro', '#rev-otro'].forEach(s => { $(s).onchange = actualizarBotonesRevision; }); $('#rev-revisor').oninput = actualizarBotonesRevision;
 async function cargarRevision(pac) {
   const seq = ++REVSEQ;
@@ -2122,7 +2553,48 @@ async function registrarRevision(estado) {
   finally { REV_GUARDANDO = false; if (vigente()) actualizarBotonesRevision(); }
 }
 $('#rev-sin').onclick = () => registrarRevision('sin_hallazgos'); $('#rev-con').onclick = () => registrarRevision('con_hallazgos');
-async function cargarRegistro() { texto('#texto-registro', (await api('registro')).join('\n')); }
+let RETIRAR = null;
+async function cargarRevisiones() {
+  const tb = $('#tabla-revisiones tbody'); tb.textContent = '';
+  let r;
+  try { r = await api('revisiones'); } catch (err) { mensaje('#revisiones-estado', 'error', err.message); return; }
+  const filas = [];
+  for (const c of r.corridas) filas.push({tipo: 'corrida', id: c.registro, alcance: 'Corrida · ' + c.pacientes.join(', '),
+    estado: c.retirada ? ['aviso', '! retirada el ' + c.retirada.fecha + ' por ' + c.retirada.quien + ': ' + c.retirada.motivo] : ['ok', '✓ registrada, sin hallazgos'],
+    quien: (c.revisor || '') + ' · ' + (c.fecha || ''), archivos: c.archivos + (c.mostrado ? ' (' + c.mostrado.cuadros_mostrados + ' cuadros mostrados)' : ''),
+    paquete: c.zip && c.zip.nombre ? c.zip.nombre + (c.zip.existe ? ' · sigue en ' + c.zip.destino : ' · ya no está en ' + c.zip.destino) : '', retirable: c.se_puede_retirar});
+  for (const p of r.pacientes) filas.push({tipo: 'paciente', id: p.paciente, alcance: 'Paciente · ' + p.paciente,
+    estado: p.estado === 'retirada' ? ['aviso', '! ' + p.detalle] : (p.estado === 'sin_hallazgos' && p.vigente ? ['ok', '✓ sin hallazgos, vigente'] : ['aviso', '! ' + (p.estado === 'con_hallazgos' ? 'con hallazgos' : 'pendiente') + ': ' + (p.detalle || '')]),
+    quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
+    paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', '), retirable: p.se_puede_retirar});
+  mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
+  for (const f of filas) {
+    const tr = document.createElement('tr');
+    celda(tr, f.alcance); const td = document.createElement('td'); td.appendChild(insignia(f.estado[0], f.estado[1])); tr.appendChild(td);
+    celda(tr, f.quien); celda(tr, f.archivos); celda(tr, f.paquete);
+    const ta = document.createElement('td');
+    if (f.retirable) { const b = document.createElement('button'); b.textContent = 'Retirar…'; b.onclick = () => { RETIRAR = f; texto('#retirar-titulo', 'Retirar la revisión: ' + f.alcance); $('#retirar-form').classList.remove('oculto'); $('#retirar-quien').focus(); }; ta.appendChild(b); }
+    tr.appendChild(ta); tb.appendChild(tr);
+  }
+}
+$('#btn-retirar-cancelar').onclick = () => { RETIRAR = null; $('#retirar-form').classList.add('oculto'); };
+$('#btn-retirar').onclick = async () => {
+  if (!RETIRAR) return;
+  const quien = $('#retirar-quien').value.trim(), motivo = $('#retirar-motivo').value.trim();
+  if (!quien || motivo.length < 3) { mensaje('#retirada-resultado', 'aviso', 'Indica quién retira la revisión y por qué.'); return; }
+  $('#btn-retirar').disabled = true;
+  try {
+    const r = await api('revisiones/retirar', {tipo: RETIRAR.tipo, id: RETIRAR.id, quien, motivo});
+    const paquetes = r.paquetes_afectados || [];
+    mensaje('#retirada-resultado', 'aviso', 'Revisión retirada (' + r.retiradas.map(x => x.tipo + ' ' + x.id).join('; ') + '). El registro original se conserva. ' +
+      (paquetes.length ? 'Estos paquetes se crearon con esa revisión y ya no deben compartirse: ' + paquetes.map(e => e.ruta + (e.existe ? (e.es_el_mismo_archivo === false ? ' (existe, pero ya no es el mismo archivo)' : ' (sigue ahí)') : ' (ya no está en esa carpeta)')).join('; ') + '. ' : 'No hay paquetes revisados que dependan de ella. ') +
+      'Retirar no cambia los zips ya exportados.');
+    RETIRAR = null; $('#retirar-form').classList.add('oculto'); $('#retirar-motivo').value = ''; await cargarRevisiones();
+    ACTUAL = null; $('#visor').classList.add('oculto');
+  } catch (err) { mensaje('#retirada-resultado', 'error', err.message); }
+  finally { $('#btn-retirar').disabled = false; }
+};
+async function cargarRegistro() { cargarRevisiones(); texto('#texto-registro', (await api('registro')).join('\n')); }
 estado();
 """
 

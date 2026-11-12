@@ -40,7 +40,7 @@ def app(tmp_path):
     return a
 
 
-def correr(app, origen: Path, destino: Path) -> dict:
+def correr(app, origen: Path, destino: Path, mostrar: bool = True) -> dict:
     """Lo mismo que hace POST /api/rapido, sin servidor y de forma síncrona."""
     assert app.CANDADO.acquire(blocking=False)
     tid = "prueba"
@@ -48,7 +48,19 @@ def correr(app, origen: Path, destino: Path) -> dict:
                          "origen": str(origen), "destino": str(app.validar_destino(destino, origen)), "zip": None, "mensaje": "",
                          "archivos": {}, "revisado": False}
     app._rapido(tid, origen, destino, "ANON")
-    return app.TRABAJOS[tid]
+    t = app.TRABAJOS[tid]
+    if mostrar and t.get("zip"):
+        mostrar_todo(app, t)
+    return t
+
+def mostrar_todo(app, t: dict) -> None:
+    """Lo que hace el navegador al recorrer la corrida: cada cuadro se sirve al visor y después se avisa de que se mostró."""
+    for indice, s in enumerate(t.get("series_corrida") or []):
+        for k, cuadros in enumerate(s["cuadros"], 1):
+            for cuadro in range(1, cuadros + 1):
+                t.setdefault("servidos", set()).add((indice, k, cuadro))
+                app.anotar_mostrado_corrida(t, indice, k, cuadro)
+
 
 
 def caso(tmp_path: Path, nombre: str = "A") -> Path:

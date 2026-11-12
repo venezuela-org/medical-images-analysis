@@ -16,6 +16,12 @@ La carpeta de datos se crea en `datos-pet` dentro de tu carpeta de usuario. Los 
 
 En la pestaña Entrada, pulsa "Crear caso de demostración": crea un CT y un PET inventados con identidad ficticia. Pulsa Anonimizar y recorre el resto: Estudios (ver cortes, Antes y después, Emparejar, Cotejar, SUV, Comparar SUV) y Enviar.
 
+## La revisión de píxeles
+
+Antes de compartir un paquete, una persona tiene que haber mirado las imágenes. Para registrar "sin hallazgos", todos los cortes tienen que haber estado en pantalla: la aplicación lo cuenta ("Mostrados en este navegador: 94 de 300") y el botón se habilita al llegar al total. "Recorrer la serie" los pasa uno a uno. Que un corte se haya mostrado no significa que esté revisado: la revisión es tu declaración, con tu nombre.
+
+Una revisión registrada por error se retira en la pestaña Registro, con tu nombre y el motivo. El registro original se conserva; los paquetes que ya se crearon con esa revisión no cambian, y la aplicación te dice cuáles son para que no se compartan. Detalle en `docs/revision-de-pixeles.md`.
+
 ## Cómo se identifica cada estudio
 
 Cada estudio aparece con una etiqueta como `ANON-0001 · F · 54 años en el estudio`: el identificador anónimo del paciente, el sexo tal como consta en el estudio y la edad que tenía el día del estudio. El identificador es siempre el mismo para un paciente; la edad cambia de un estudio a otro. Los estudios que ya estaban importados muestran el sexo, y la edad calculada aparece al volver a importar su carpeta original. Detalle en `docs/demografia.md`.

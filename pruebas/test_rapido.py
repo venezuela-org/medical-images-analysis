@@ -58,7 +58,28 @@ class Servidor:
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read().decode() or "{}")
 
-    def rapido(self, origen: Path, destino: Path | None = None) -> dict:
+    def png(self, ruta: str) -> tuple[int, bytes]:
+        req = urllib.request.Request(f"http://127.0.0.1:{self.puerto}/api/{ruta}", headers={"X-Token": self.token})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def mostrar_todo(self, t: dict) -> dict:
+        """Lo que hace el navegador al recorrer la corrida: pide cada cuadro al visor y avisa de que lo mostró."""
+        _, series = self.api(f"rapido/{t['id']}/series")
+        avance = {}
+        for s in series:
+            for k, cuadros in enumerate(s["cuadros"], 1):
+                for cuadro in range(1, cuadros + 1):
+                    estado, _ = self.png(f"rapido/{t['id']}/corte/{s['indice']}/{k}?cuadro={cuadro}")
+                    assert estado == 200
+                    estado, avance = self.api(f"rapido/{t['id']}/mostrado", {"indice": s["indice"], "k": k, "cuadro": cuadro})
+                    assert estado == 200
+        return avance
+
+    def rapido(self, origen: Path, destino: Path | None = None, mostrar: bool = True) -> dict:
         estado, r = self.api("rapido", {"origen": str(origen), "destino": str(destino) if destino else ""})
         assert estado == 200, r
         for _ in range(240):
@@ -67,6 +88,8 @@ class Servidor:
                 break
             time.sleep(0.5)
         t["id"] = r["trabajo"]
+        if mostrar and t.get("zip"):
+            self.mostrar_todo(t)
         return t
 
     def cerrar(self):
@@ -260,3 +283,59 @@ def test_archivos_con_varios_cuadros_por_la_api(srv, tmp_path):
     assert estado == 200                                              # registrar hallazgos sí se puede
     estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
     assert estado == 200 and r["revision_pixeles_pendiente"] == []    # y la corrida, que sí permite verlos todos, se revisa
+
+
+def test_avance_y_retirada_por_la_api(srv, tmp_path):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    t = srv.rapido(caso(tmp_path, "A"), destino, mostrar=False)
+    assert t["progreso"]["mostrados"] == 0 and t["progreso"]["total"] == 8      # la corrida no cuenta lo que dibujó por su cuenta
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 409 and "se han mostrado 0 de 8 cuadros" in r["detail"]
+    estado, r = srv.api(f"rapido/{t['id']}/mostrado", {"indice": 0, "k": 1, "cuadro": 1})
+    assert estado == 409                                              # avisar sin haber pedido el cuadro al visor no cuenta
+    avance = srv.mostrar_todo(t)
+    assert avance["completo"] is True and avance["mostrados"] == 8
+    _, estado_trabajo = srv.api(f"trabajo/{t['id']}")
+    assert estado_trabajo["progreso"]["completo"] is True and "servidos" not in estado_trabajo and "mostrados" not in estado_trabajo
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Ana"})
+    assert estado == 200 and Path(r["zip"]).parent == destino
+    # la lista de revisiones registradas, y la retirada
+    _, lista = srv.api("revisiones")
+    corrida = lista["corridas"][0]
+    assert corrida["revisor"] == "Ana" and corrida["se_puede_retirar"] is True and corrida["zip"]["existe"] is True
+    assert corrida["mostrado"]["cuadros_mostrados"] == 8
+    estado, _ = srv.api("revisiones/retirar", {"tipo": "corrida", "id": corrida["registro"], "quien": "", "motivo": "sin nombre"})
+    assert estado == 400
+    antes = Path(r["zip"]).read_bytes()
+    estado, ret = srv.api("revisiones/retirar", {"tipo": "corrida", "id": corrida["registro"], "quien": "Arturo", "motivo": "registrada como prueba"})
+    assert estado == 200 and ret["paquetes_afectados"][0]["ruta"] == r["zip"] and ret["paquetes_afectados"][0]["existe"] is True
+    assert Path(r["zip"]).read_bytes() == antes                       # el zip exportado no cambia
+    _, lista = srv.api("revisiones")
+    assert lista["corridas"][0]["retirada"]["quien"] == "Arturo" and lista["corridas"][0]["se_puede_retirar"] is False
+    _, rev = srv.api(f"revision/{t['pacientes'][0]}")
+    assert rev["estado"] == "retirada" and rev["lista_para_compartir"] is False
+    _, estado_trabajo = srv.api(f"trabajo/{t['id']}")
+    assert estado_trabajo["revision_retirada"]["motivo"] == "registrada como prueba"
+
+
+def test_revision_clasica_por_la_api_exige_mostrar_todos_los_cortes(srv, tmp_path):
+    t = srv.rapido(caso(tmp_path, "A"))
+    pac = t["pacientes"][0]
+    _, series = srv.api("estudios?refrescar=1")
+    estado, r = srv.api("revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "Prueba"})
+    assert estado == 409 and "se han mostrado 0 de 8 cortes" in r["detail"]
+    estado, _ = srv.api(f"serie/{series[0]['id']}/mostrado", {"i": 0})
+    assert estado == 409                                              # sin haberlo pedido al visor, no cuenta
+    for s in series:
+        for i in range(s["n"]):
+            assert srv.png(f"serie/{s['id']}/corte/{i}")[0] == 200
+            estado, avance = srv.api(f"serie/{s['id']}/mostrado", {"i": i})
+            assert estado == 200
+    assert avance["completo"] is True
+    _, rev = srv.api(f"revision/{pac}")
+    assert rev["progreso"]["mostrados"] == 8
+    estado, r = srv.api("revision", {"paciente": pac, "estado": "sin_hallazgos", "hallazgos": [], "revisor": "Prueba"})
+    assert estado == 200 and r["lista_para_compartir"] is True and r["mostrado"]["cuadros_mostrados"] == 8
+    estado, ret = srv.api("revisiones/retirar", {"tipo": "paciente", "id": pac, "quien": "Arturo", "motivo": "prueba de retirada"})
+    assert estado == 200 and ret["retiradas"] == [{"tipo": "paciente", "id": pac}]
