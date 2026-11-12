@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -1359,32 +1359,39 @@ def anotar_mostrado_estudios(pac: str, ruta: str, cuadro: int) -> bool:
 
 def progreso_paciente(pac: str, hashes: dict[str, str] | None = None) -> dict:
     """Cortes del paciente (toda la serie guardada, un cuadro por archivo) que han estado en pantalla en Estudios.
-    Sin `hashes` es el contador de la pantalla: rápido, por tamaño y fecha. Con `hashes` (los sha256 actuales de los
-    archivos del paciente) es la comprobación que autoriza: un corte cuenta solo si los bytes que se mostraron son, por
-    su sha256, los que el archivo tiene ahora."""
+    Sin `hashes` es el contador de la pantalla: rápido, por tamaño y fecha, sobre el inventario cargado.
+    Con `hashes` (los sha256 actuales de TODOS los archivos del paciente en disco) es la comprobación que autoriza:
+      - un corte cuenta solo si los bytes que se mostraron son, por su sha256, los que el archivo tiene ahora;
+      - el conjunto de archivos en disco tiene que ser exactamente el del inventario que se recorrió. Un archivo que
+        llegó después del último inventario no se ha podido mostrar, y uno del inventario que ya no está tampoco vale."""
     mostrados = (MOSTRADOS_ESTUDIOS.get(pac) or {}).get("mostrados") or {}
     base = carpeta_paciente(pac).resolve() if hashes is not None else None
-    series, total, vistos = [], 0, 0
+    series, total, vistos, en_inventario = [], 0, 0, set()
     for sid, s_ in INDICE.items():
         if s_["paciente"] != pac:
             continue
         n = 0
         for _, ruta in s_["cortes"]:
             marca = mostrados.get((ruta, 1))
-            if marca is None:
-                continue
             if hashes is None:
-                n += marca[1] == _firma_archivo(ruta)
-            else:
-                try:
-                    rel = Path(ruta).resolve().relative_to(base).as_posix()
-                except ValueError:
-                    continue
-                n += marca[0] == hashes.get(rel)
+                n += marca is not None and marca[1] == _firma_archivo(ruta)
+                continue
+            try:
+                rel = Path(ruta).resolve().relative_to(base).as_posix()
+            except ValueError:
+                continue
+            en_inventario.add(rel)
+            n += marca is not None and marca[0] == hashes.get(rel)
         series.append({"serie": sid, "total": s_["n"], "mostrados": n})
         total, vistos = total + s_["n"], vistos + n
-    return {"mostrados": vistos, "total": total, "completo": total > 0 and vistos == total, "series": series,
-            "verificado_por_contenido": hashes is not None, "nota": NOTA_MOSTRADO}
+    resultado = {"mostrados": vistos, "total": total, "series": series, "verificado_por_contenido": hashes is not None, "nota": NOTA_MOSTRADO}
+    if hashes is None:
+        return {**resultado, "completo": total > 0 and vistos == total}
+    fuera = sorted(set(hashes) - en_inventario)                       # en disco, pero no en el inventario que se recorrió
+    ausentes = sorted(en_inventario - set(hashes))                    # en el inventario, pero ya no en disco
+    total = len(set(hashes) | en_inventario)
+    return {**resultado, "total": total, "fuera_del_inventario": len(fuera), "ya_no_estan": len(ausentes),
+            "completo": total > 0 and vistos == total and not fuera and not ausentes}
 
 
 def anotar_no_mostrable(t: dict, indice: int, k: int, cuadro: int, motivo: str) -> None:
@@ -1576,9 +1583,11 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         cubiertos = []
         for pac in t["pacientes"]:
             try:   # la revisión del paciente completo solo se actualiza si la corrida cubre todos sus archivos guardados
-                if set(hashes_paciente(pac)) == {rel.split("/", 1)[1] for rel in t["archivos"] if rel.startswith(pac + "/")}:
+                # mismos archivos y mismos bytes: lo que hay ahora del paciente es, hash por hash, lo que la corrida mostró y publicó
+                actuales = hashes_paciente(pac)
+                if actuales == {rel.split("/", 1)[1]: h for rel, h in t["archivos"].items() if rel.startswith(pac + "/")}:
                     guardar_revision(pac, "sin_hallazgos", [], revisor, "registrada desde el modo rápido; cubre todos los archivos del paciente",
-                                     origen={"corrida": Path(registro_revision).name}, mostrado=revision["mostrado"])
+                                     origen={"corrida": Path(registro_revision).name}, mostrado=revision["mostrado"], archivos=actuales)
                     cubiertos.append(pac)
             except Exception as e:
                 avisos_posteriores.append(f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); el zip publicado y su registro no cambian")
@@ -2482,22 +2491,23 @@ def revision(request: Request, pac: str):
     return {**leer_revision(pac), "progreso": progreso_paciente(pac)}
 
 
-@api.post("/revision")
-def registrar_revision(request: Request, cuerpo: dict):
-    """Registra la revisión de píxeles de un paciente contra los hashes exactos de sus archivos."""
-    auth(request)
-    pac = str(cuerpo.get("paciente", ""))
+def registrar_revision_de_paciente(pac: str, estado: str, hallazgos: list[str], revisor: str, notas: str = "") -> dict:
+    """Registra la revisión de píxeles de un paciente desde la pestaña Estudios, bajo el mismo candado que las
+    importaciones, las corridas, los empaquetados y las retiradas: mientras se registra, nada más toca sus archivos ni sus
+    registros. Para 'sin hallazgos', los archivos del paciente en disco tienen que ser exactamente los del inventario que
+    se recorrió, y cada uno tiene que haberse mostrado con los bytes que tiene ahora."""
     carpeta_paciente(pac)
-    estado = str(cuerpo.get("estado", ""))
-    hallazgos = [str(h) for h in cuerpo.get("hallazgos", [])]
-    revisor = str(cuerpo.get("revisor", "")).strip()[:120]
     error = validar_registro_revision(estado, hallazgos, revisor)
     if error:
         raise HTTPException(400, error)
-    if estado == "sin_hallazgos":
+    if not CANDADO.acquire(blocking=False):
+        raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de registrar la revisión")
+    try:
+        if estado != "sin_hallazgos":
+            return guardar_revision(pac, estado, hallazgos, revisor, notas)
         retiradas = estado_de_retiradas()
         if retiradas["bloqueo"]:                                      # antes de exigir nada más: se dice qué diario requiere atención
-            return JSONResponse(status_code=409, content=RevisionBloqueada(retiradas["problemas"], "registrar una revisión sin hallazgos").cuerpo())
+            raise RevisionBloqueada(retiradas["problemas"], "registrar una revisión sin hallazgos")
         if not INDICE:
             indexar()
         if any(s_["paciente"] == pac and s_.get("cuadros_max", 1) > 1 for s_ in INDICE.values()):
@@ -2505,15 +2515,30 @@ def registrar_revision(request: Request, cuerpo: dict):
                                      "para registrar 'sin hallazgos' recorre todos los cuadros en el visor de una corrida del modo rápido")
         actuales = hashes_paciente(pac)                               # una lectura de los archivos: con ella se comprueba y se registra
         avance = progreso_paciente(pac, actuales)
+        if avance["fuera_del_inventario"] or avance["ya_no_estan"]:
+            indexar()                                                 # el inventario estaba desactualizado: se rehace para que se vea lo que falta
+            raise HTTPException(409, "los archivos de este paciente ya no son los del inventario que se recorrió: "
+                                     f"{avance['fuera_del_inventario']} archivo(s) llegaron después y {avance['ya_no_estan']} ya no están. "
+                                     "El inventario se ha actualizado; pulsa Refrescar, recorre lo que falta y vuelve a registrar")
         if not avance["completo"]:
             raise HTTPException(409, f"en el navegador se han mostrado {avance['mostrados']} de {avance['total']} cortes de este paciente "
                                      "tal como están ahora; para declarar 'sin hallazgos', todos tienen que haber estado en pantalla")
         mostrado = {"cuadros_mostrados": avance["mostrados"], "cuadros_totales": avance["total"], "donde": "pestaña Estudios, en el navegador", "nota": NOTA_MOSTRADO}
-        try:
-            return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000], mostrado=mostrado, archivos=actuales)
-        except RevisionBloqueada as e:                                # dejó de poder verificarse entre la comprobación y el guardado
-            return JSONResponse(status_code=409, content=e.cuerpo())
-    return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
+        return guardar_revision(pac, estado, hallazgos, revisor, notas, mostrado=mostrado, archivos=actuales)
+    finally:
+        CANDADO.release()
+
+
+@api.post("/revision")
+def registrar_revision(request: Request, cuerpo: dict):
+    """Registra la revisión de píxeles de un paciente contra los hashes exactos de sus archivos."""
+    auth(request)
+    try:
+        return registrar_revision_de_paciente(str(cuerpo.get("paciente", "")), str(cuerpo.get("estado", "")),
+                                              [str(h) for h in cuerpo.get("hallazgos", [])], str(cuerpo.get("revisor", "")).strip()[:120],
+                                              str(cuerpo.get("notas", ""))[:2000])
+    except RevisionBloqueada as e:
+        return JSONResponse(status_code=409, content=e.cuerpo())
 
 
 @api.get("/revisiones")

@@ -241,9 +241,9 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|
 | Acentos, toda la cadena | Salida de las herramientas decodificada como UTF-8 (antes cp1252 en Windows: "polÃ­tica"); selector de carpetas en UTF-8 para rutas con acentos; app.js y app.css con charset; consola de Windows en UTF-8; todas las lecturas y escrituras de texto con encoding explícito |
 
-# Cambios 0.9.9 / Changes 0.9.9
+# Cambios 0.9.10 / Changes 0.9.10
 
-Las versiones 0.8.0 a 0.9.8 no se publicaron; sus cambios y los hallazgos de sus once rondas de revisión, más los de la revisión automática del PR #2, están aquí.
+Las versiones 0.8.0 a 0.9.9 no se publicaron; sus cambios y los hallazgos de sus once rondas de revisión, más los de la revisión automática del PR #2, están aquí.
 
 | # | Hallazgo o cambio / Finding or change | Qué se hizo / What was done | Prueba / Test |
 |---|---|---|---|
@@ -280,3 +280,4 @@ Las versiones 0.8.0 a 0.9.8 no se publicaron; sus cambios y los hallazgos de sus
 | 31 | PR #2, P1: lo mostrado en Estudios se identificaba por tamaño y fecha del archivo | Se guarda el sha256 de los bytes servidos y la revisión se autoriza comparándolo con el sha256 actual; el registro se liga a esos mismos hashes | `test_un_archivo_sustituido_con_el_mismo_tamano_y_la_misma_fecha_no_cuenta_como_mostrado`, `test_la_revision_de_estudios_se_liga_al_contenido_mostrado` |
 | 32 | PR #2, P2: los paquetes afectados por una retirada se reconocían por la fecha de la revisión, con precisión de un segundo | El manifiesto cita `registro_sha256`; se compara por él, y por la fecha solo en manifiestos anteriores | `test_dos_revisiones_en_el_mismo_segundo_no_se_confunden`, `test_un_manifiesto_anterior_sin_identificador_se_sigue_reconociendo_por_la_fecha` |
 | 33 | PR #2, P2: `demografia.json` se sobrescribía sin escritura atómica, y un registro truncado se daba por vacío | Temporal y renombrado; un registro ilegible se aparta con otro nombre y se avisa | `test_el_registro_de_demografia_se_escribe_entero_o_no_se_toca`, `test_un_registro_de_demografia_ilegible_se_aparta_y_se_avisa`, `test_el_aviso_de_un_registro_ilegible_llega_a_la_pantalla_y_al_reporte` |
+| 34 | PR #2, segunda revisión, P1: con el inventario de la pantalla desactualizado, una revisión "sin hallazgos" de Estudios incluía archivos que llegaron después y no se habían mostrado | `registrar_revision_de_paciente()` toma el candado común; la comprobación por contenido exige que los archivos en disco sean exactamente los del inventario recorrido, y si no lo son rehace el inventario y rechaza. La revisión de paciente que escribe una corrida se liga a los hashes congelados de la corrida | `test_los_archivos_que_llegaron_despues_del_ultimo_inventario_no_quedan_revisados`, `test_un_archivo_del_inventario_que_ya_no_esta_tampoco_deja_registrar`, `test_registrar_una_revision_usa_el_candado_comun`, `test_la_revision_de_paciente_que_escribe_una_corrida_se_liga_a_los_bytes_publicados` |

@@ -330,3 +330,104 @@ def test_un_manifiesto_anterior_sin_identificador_se_sigue_reconociendo_por_la_f
     local.write_text(json.dumps(m), encoding="utf-8")
     r = app.retirar_revision("paciente", pac, "Arturo", "manifiesto antiguo")
     assert [e["zip"] for e in r["paquetes_afectados"]] == [Path(paquete["ruta"]).name]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# segunda revisión automática: el inventario que se recorrió tiene que ser el de los archivos que se registran
+# ---------------------------------------------------------------------------------------------------------------
+
+def test_los_archivos_que_llegaron_despues_del_ultimo_inventario_no_quedan_revisados(app, tmp_path):
+    """Se recorre al paciente entero. Después se importa otro estudio suyo y el inventario de la pantalla no se rehace.
+    La declaración 'sin hallazgos' no puede cubrir los archivos nuevos, que nadie ha visto."""
+    ta = correr(app, caso(tmp_path, "A", 1), tmp_path, "A")
+    pac = ta["pacientes"][0]
+    mostrar_en_estudios(app, pac)                                     # los 8 cortes, mostrados
+    inventario_viejo = dict(app.INDICE)
+    correr(app, caso(tmp_path, "B", 2), tmp_path, "B")                # otro estudio del mismo paciente: 8 archivos más en disco
+    app.INDICE.clear()
+    app.INDICE.update(inventario_viejo)                               # la pantalla sigue con el inventario de antes
+    assert len(app.hashes_paciente(pac)) == 16 and sum(s["n"] for s in app.INDICE.values()) == 8
+    registro = app.TRABAJO / "limpios_REPORTES" / f"revision_pixeles_{pac}.json"
+    with pytest.raises(HTTPException) as x:
+        app.registrar_revision_de_paciente(pac, "sin_hallazgos", [], "Ana")
+    assert x.value.status_code == 409 and "8 archivo(s) llegaron después" in x.value.detail and "Refrescar" in x.value.detail
+    assert not registro.exists() and not app.CANDADO.locked()         # nada registrado
+    assert sum(s["n"] for s in app.INDICE.values()) == 16             # y el inventario se rehízo: ahora se ve lo que falta
+    with pytest.raises(HTTPException) as x:                           # con el inventario al día, faltan 8 por mostrar
+        app.registrar_revision_de_paciente(pac, "sin_hallazgos", [], "Ana")
+    assert "se han mostrado 8 de 16 cortes" in x.value.detail and not registro.exists()
+    mostrar_en_estudios(app, pac)                                     # recorridos los 16, se registra
+    r = app.registrar_revision_de_paciente(pac, "sin_hallazgos", [], "Ana")
+    assert r["lista_para_compartir"] is True and r["archivos_revisados"] == 16 and r["mostrado"]["cuadros_mostrados"] == 16
+    assert json.loads(registro.read_text(encoding="utf-8"))["archivos"] == app.hashes_paciente(pac)
+
+
+def test_un_archivo_del_inventario_que_ya_no_esta_tampoco_deja_registrar(app, tmp_path):
+    t = correr(app, caso(tmp_path), tmp_path, "c")
+    pac = t["pacientes"][0]
+    mostrar_en_estudios(app, pac)
+    Path(next(iter(app.INDICE.values()))["cortes"][0][1]).unlink()
+    with pytest.raises(HTTPException) as x:
+        app.registrar_revision_de_paciente(pac, "sin_hallazgos", [], "Ana")
+    assert x.value.status_code == 409 and "1 ya no están" in x.value.detail
+
+
+def test_registrar_una_revision_usa_el_candado_comun(app, tmp_path):
+    t = correr(app, caso(tmp_path), tmp_path, "c")
+    pac = t["pacientes"][0]
+    mostrar_en_estudios(app, pac)
+    assert app.CANDADO.acquire(blocking=False)                        # una importación, una corrida, un empaquetado o una retirada en curso
+    try:
+        for estado, hallazgos in (("sin_hallazgos", []), ("con_hallazgos", ["rostro"])):
+            with pytest.raises(HTTPException) as x:
+                app.registrar_revision_de_paciente(pac, estado, hallazgos, "Ana")
+            assert x.value.status_code == 409 and "otro trabajo en curso" in x.value.detail
+    finally:
+        app.CANDADO.release()
+    assert app.registrar_revision_de_paciente(pac, "sin_hallazgos", [], "Ana")["lista_para_compartir"] is True
+    assert not app.CANDADO.locked()
+
+
+def test_la_revision_de_paciente_que_escribe_una_corrida_se_liga_a_los_bytes_publicados(app, tmp_path, monkeypatch):
+    def corrida_mostrada(nombre, semilla, tid):
+        t = correr(app, caso(tmp_path, nombre, semilla), tmp_path / f"destino-{tid}", tid)
+        for i, s in enumerate(t["series_corrida"]):
+            for k, n in enumerate(s["cuadros"], 1):
+                t["servidos"].add((i, k, 1))
+                app.anotar_mostrado_corrida(t, i, k, 1)
+        return t
+
+    (tmp_path / "destino-uno").mkdir()
+    t = corrida_mostrada("A", 1, "uno")
+    pac = t["pacientes"][0]
+    r = app.aplicar_revision_rapido(t, "Ana")
+    assert r["revision_de_paciente_actualizada"] == [pac]
+    registro = json.loads((app.TRABAJO / "limpios_REPORTES" / f"revision_pixeles_{pac}.json").read_text(encoding="utf-8"))
+    assert registro["archivos"] == {rel.split("/", 1)[1]: h for rel, h in t["archivos"].items()}   # los hashes congelados de la corrida
+
+    # otra corrida, de otro paciente; tras publicar, uno de sus archivos ya no es el que se mostró
+    (tmp_path / "destino-dos").mkdir()
+    origen = caso(tmp_path, "otro", 5)
+    for f in origen.rglob("IM*"):
+        ds = pydicom.dcmread(f)
+        ds.PatientID = "DEMO-000555"
+        ds.save_as(f, enforce_file_format=True)
+    t2 = correr(app, origen, tmp_path / "destino-dos", "dos")
+    for i, s in enumerate(t2["series_corrida"]):
+        for k, n in enumerate(s["cuadros"], 1):
+            t2["servidos"].add((i, k, 1))
+            app.anotar_mostrado_corrida(t2, i, k, 1)
+    otro = t2["pacientes"][0]
+    real = app.hashes_paciente
+
+    def con_un_archivo_distinto(p):
+        h = real(p)
+        if p == otro:
+            primero = sorted(h)[0]
+            h[primero] = "0" * 64                                     # mismo conjunto de archivos, otros bytes en uno
+        return h
+
+    monkeypatch.setattr(app, "hashes_paciente", con_un_archivo_distinto)
+    r2 = app.aplicar_revision_rapido(t2, "Ana")
+    assert r2["revision_de_paciente_actualizada"] == []               # la corrida vale; la revisión del paciente entero, no
+    assert not (app.TRABAJO / "limpios_REPORTES" / f"revision_pixeles_{otro}.json").exists()

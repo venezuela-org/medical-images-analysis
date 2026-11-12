@@ -10,6 +10,7 @@ Para declarar "sin hallazgos" hace falta que todos los cortes hayan estado en pa
 - En un archivo con varios cuadros cuenta cada cuadro.
 - Las comprobaciones que la aplicación hace por su cuenta, como dibujar una imagen de cada serie para saber si el visor puede con ella, no cuentan.
 - Lo mostrado se liga al contenido. De cada corte se guarda el sha256 de los bytes que se sirvieron al visor, y al registrar la revisión se compara con el sha256 que el archivo tiene en ese momento: si un archivo se sustituyó por otro, aunque tenga el mismo tamaño y la misma fecha, sus cortes no cuentan. El contador que se ve en pantalla es más ligero (mira tamaño y fecha) y sirve de orientación; lo que autoriza es la comparación por contenido.
+- Lo que se registra es lo que se recorrió. Al registrar "sin hallazgos" en Estudios, los archivos del paciente que hay en disco tienen que ser exactamente los del inventario que estaba en pantalla. Si después de cargar ese inventario llegó algún archivo, o falta alguno, la revisión se rechaza, el inventario se rehace y hay que recorrer lo que falta.
 
 El recuento aparece como "Mostrados en este navegador: 94 de 5.968 cuadros". **Mostrado no significa revisado.** Que una imagen haya pasado por la pantalla no prueba que alguien la haya mirado con atención; el recuento solo impide declarar que se revisó todo cuando parte no llegó a verse. El botón "Recorrer la serie" pasa los cortes uno a uno por la pantalla; mirarlos sigue siendo cosa de quien revisa.
 
