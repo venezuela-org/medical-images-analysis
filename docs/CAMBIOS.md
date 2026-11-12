@@ -241,9 +241,9 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|
 | Acentos, toda la cadena | Salida de las herramientas decodificada como UTF-8 (antes cp1252 en Windows: "polÃ­tica"); selector de carpetas en UTF-8 para rutas con acentos; app.js y app.css con charset; consola de Windows en UTF-8; todas las lecturas y escrituras de texto con encoding explícito |
 
-# Cambios 0.9.10 / Changes 0.9.10
+# Cambios 0.9.11 / Changes 0.9.11
 
-Las versiones 0.8.0 a 0.9.9 no se publicaron; sus cambios y los hallazgos de sus once rondas de revisión, más los de la revisión automática del PR #2, están aquí.
+Las versiones 0.8.0 a 0.9.10 no se publicaron; sus cambios y los hallazgos de sus once rondas de revisión, más los de la revisión automática del PR #2, están aquí.
 
 | # | Hallazgo o cambio / Finding or change | Qué se hizo / What was done | Prueba / Test |
 |---|---|---|---|
@@ -281,3 +281,5 @@ Las versiones 0.8.0 a 0.9.9 no se publicaron; sus cambios y los hallazgos de sus
 | 32 | PR #2, P2: los paquetes afectados por una retirada se reconocían por la fecha de la revisión, con precisión de un segundo | El manifiesto cita `registro_sha256`; se compara por él, y por la fecha solo en manifiestos anteriores | `test_dos_revisiones_en_el_mismo_segundo_no_se_confunden`, `test_un_manifiesto_anterior_sin_identificador_se_sigue_reconociendo_por_la_fecha` |
 | 33 | PR #2, P2: `demografia.json` se sobrescribía sin escritura atómica, y un registro truncado se daba por vacío | Temporal y renombrado; un registro ilegible se aparta con otro nombre y se avisa | `test_el_registro_de_demografia_se_escribe_entero_o_no_se_toca`, `test_un_registro_de_demografia_ilegible_se_aparta_y_se_avisa`, `test_el_aviso_de_un_registro_ilegible_llega_a_la_pantalla_y_al_reporte` |
 | 34 | PR #2, segunda revisión, P1: con el inventario de la pantalla desactualizado, una revisión "sin hallazgos" de Estudios incluía archivos que llegaron después y no se habían mostrado | `registrar_revision_de_paciente()` toma el candado común; la comprobación por contenido exige que los archivos en disco sean exactamente los del inventario recorrido, y si no lo son rehace el inventario y rechaza. La revisión de paciente que escribe una corrida se liga a los hashes congelados de la corrida | `test_los_archivos_que_llegaron_despues_del_ultimo_inventario_no_quedan_revisados`, `test_un_archivo_del_inventario_que_ya_no_esta_tampoco_deja_registrar`, `test_registrar_una_revision_usa_el_candado_comun`, `test_la_revision_de_paciente_que_escribe_una_corrida_se_liga_a_los_bytes_publicados` |
+| 35 | PR #2, tercera revisión, P2: si el zip del modo rápido se publicaba y fallaba el renombrado que confirma su registro, la revisión desaparecía de Registro y no se podía retirar | La identidad de un registro de corrida es su nombre canónico, sin `.preparada`, más su sha256; Registro y la retirada miran también los provisionales; `confirmar_evidencias_publicadas()` termina el renombrado cuando el zip está publicado | `test_un_registro_de_corrida_que_queda_provisional_tras_publicar_se_ve_y_se_puede_retirar` (2), `test_tambien_se_puede_retirar_dando_el_nombre_provisional`, `test_una_evidencia_provisional_sin_zip_publicado_no_se_confirma_sola` |
+| 36 | PR #2, tercera revisión, P2: un paquete publicado cuyo manifiesto local quedaba con nombre provisional no aparecía entre los afectados por una retirada | `paquetes_que_dependen_de()` lee también los manifiestos provisionales | `test_un_paquete_cuyo_manifiesto_quedo_provisional_tambien_se_senala_al_retirar` |

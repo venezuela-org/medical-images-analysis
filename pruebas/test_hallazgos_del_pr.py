@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import zipfile
 from pathlib import Path
 
@@ -431,3 +432,115 @@ def test_la_revision_de_paciente_que_escribe_una_corrida_se_liga_a_los_bytes_pub
     r2 = app.aplicar_revision_rapido(t2, "Ana")
     assert r2["revision_de_paciente_actualizada"] == []               # la corrida vale; la revisión del paciente entero, no
     assert not (app.TRABAJO / "limpios_REPORTES" / f"revision_pixeles_{otro}.json").exists()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# tercera revisión automática: evidencias que se quedan con nombre provisional después de publicar
+# ---------------------------------------------------------------------------------------------------------------
+
+def corrida_mostrada(app, tmp_path, tid: str = "c", semilla: int = 1) -> dict:
+    destino = tmp_path / f"destino-{tid}"
+    destino.mkdir()
+    t = correr(app, caso(tmp_path, f"caso-{tid}", semilla), destino, tid)
+    for i, s in enumerate(t["series_corrida"]):
+        for k, n in enumerate(s["cuadros"], 1):
+            t["servidos"].add((i, k, 1))
+            app.anotar_mostrado_corrida(t, i, k, 1)
+    return t
+
+
+def sin_poder_renombrar(app, monkeypatch, cumple):
+    """Hace fallar el renombrado de las evidencias cuyo nombre final cumple la condición. Devuelve cómo deshacerlo."""
+    real = app.os.replace
+
+    def falso(a, b):
+        if cumple(Path(b).name):
+            raise OSError("sin permiso")
+        return real(a, b)
+
+    monkeypatch.setattr(app.os, "replace", falso)
+    return lambda: monkeypatch.setattr(app.os, "replace", real)
+
+
+es_registro_confirmado = lambda n: re.fullmatch(r"revision_rapido_\d{8}_\d{6}_[0-9a-f]{4}\.json", n) is not None   # solo el registro, no su anotación de retirada
+es_manifiesto_confirmado = lambda n: n.startswith("paquete_") and n.endswith(".manifiesto.json")
+
+
+@pytest.mark.parametrize("direccion", ["corrida", "paciente"])
+def test_un_registro_de_corrida_que_queda_provisional_tras_publicar_se_ve_y_se_puede_retirar(app, tmp_path, monkeypatch, direccion):
+    t = corrida_mostrada(app, tmp_path)
+    pac = t["pacientes"][0]
+    deshacer = sin_poder_renombrar(app, monkeypatch, es_registro_confirmado)
+    r = app.aplicar_revision_rapido(t, "Ana")                         # el zip se publica; el renombrado del registro falla
+    provisional = Path(r["registro_revision"])
+    canonico = provisional.name[:-len(app.SUFIJO_PREPARADO)]
+    assert provisional.name.endswith(app.SUFIJO_PREPARADO) and Path(r["zip"]).is_file()
+    assert r["registro_confirmado"] is False and any("nombre provisional" in a for a in r["avisos_posteriores"])
+    sha_registro, sha_zip = hashlib.sha256(provisional.read_bytes()).hexdigest(), hashlib.sha256(Path(r["zip"]).read_bytes()).hexdigest()
+    # la revisión de paciente que escribió cita la corrida por su nombre canónico
+    origen = json.loads((app.TRABAJO / "limpios_REPORTES" / f"revision_pixeles_{pac}.json").read_text(encoding="utf-8"))["origen"]
+    assert origen == {"corrida": canonico}
+    # el renombrado sigue sin poder hacerse: la revisión se ve en Registro y se puede retirar
+    fila = app.revisiones_registradas()["corridas"]
+    assert len(fila) == 1 and fila[0]["registro"] == canonico and fila[0]["provisional"] is True
+    assert fila[0]["se_puede_retirar"] is True and fila[0]["revisor"] == "Ana" and fila[0]["zip"]["existe"] is True
+    ret = app.retirar_revision("corrida", canonico, "Arturo", "publicada con registro provisional") if direccion == "corrida" \
+        else app.retirar_revision("paciente", pac, "Arturo", "publicada con registro provisional")
+    assert ret["estado"] == "completa" and {(x["tipo"], x["id"]) for x in ret["retiradas"]} == {("corrida", canonico), ("paciente", pac)}
+    assert [e["ruta"] for e in ret["paquetes_afectados"]] == [r["zip"]] and ret["paquetes_afectados"][0]["es_el_mismo_archivo"] is True
+    assert app.leer_revision(pac)["estado"] == "retirada"
+    assert (app.TRABAJO / "limpios_REPORTES" / (canonico[:-5] + ".retirada.json")).is_file()
+    # nada original cambia
+    assert hashlib.sha256(provisional.read_bytes()).hexdigest() == sha_registro and hashlib.sha256(Path(r["zip"]).read_bytes()).hexdigest() == sha_zip
+    # cuando el renombrado ya se puede hacer, se termina; y la retirada sigue alcanzando a ese registro
+    deshacer()
+    assert app.confirmar_evidencias_publicadas() == [{"evidencia": canonico, "estado": "confirmada"}]
+    confirmado = app.TRABAJO / "limpios_REPORTES" / canonico
+    assert confirmado.is_file() and not provisional.exists() and hashlib.sha256(confirmado.read_bytes()).hexdigest() == sha_registro
+    fila = app.revisiones_registradas()["corridas"][0]
+    assert fila["provisional"] is False and fila["retirada"]["quien"] == "Arturo" and fila["se_puede_retirar"] is False
+    with pytest.raises(HTTPException) as x:
+        app.retirar_revision("corrida", canonico, "Arturo", "otra vez")
+    assert x.value.status_code == 409
+
+
+def test_tambien_se_puede_retirar_dando_el_nombre_provisional(app, tmp_path, monkeypatch):
+    t = corrida_mostrada(app, tmp_path)
+    sin_poder_renombrar(app, monkeypatch, es_registro_confirmado)
+    r = app.aplicar_revision_rapido(t, "Ana")
+    nombre = Path(r["registro_revision"]).name                        # con el sufijo provisional
+    ret = app.retirar_revision("corrida", nombre, "Arturo", "por el nombre que quedó en disco")
+    assert ret["estado"] == "completa" and ("corrida", nombre[:-len(app.SUFIJO_PREPARADO)]) in {(x["tipo"], x["id"]) for x in ret["retiradas"]}
+
+
+def test_un_paquete_cuyo_manifiesto_quedo_provisional_tambien_se_senala_al_retirar(app, tmp_path, monkeypatch):
+    pac = paciente_revisado(app, tmp_path)
+    deshacer = sin_poder_renombrar(app, monkeypatch, es_manifiesto_confirmado)
+    paquete = app.crear_paquete([pac])                                # se publica; el renombrado del manifiesto local falla
+    nombre = Path(paquete["ruta"]).name
+    carpeta = app.TRABAJO / "paquetes"
+    assert paquete["revision_pixeles_pendiente"] == [] and paquete["avisos"]
+    assert (carpeta / (nombre[:-4] + ".manifiesto.json" + app.SUFIJO_PREPARADO)).is_file() and not (carpeta / (nombre[:-4] + ".manifiesto.json")).exists()
+    ret = app.retirar_revision("paciente", pac, "Arturo", "el paquete tiene el manifiesto con nombre provisional")
+    assert [e["zip"] for e in ret["paquetes_afectados"]] == [nombre]  # el paquete publicado no se pierde de vista
+    assert ret["paquetes_afectados"][0]["existe"] is True and ret["paquetes_afectados"][0]["es_el_mismo_archivo"] is True
+    deshacer()
+    assert app.confirmar_evidencias_publicadas() == [{"evidencia": nombre[:-4] + ".manifiesto.json", "estado": "confirmada"}]
+    assert (carpeta / (nombre[:-4] + ".manifiesto.json")).is_file()
+
+
+def test_una_evidencia_provisional_sin_zip_publicado_no_se_confirma_sola(app, tmp_path):
+    """Resto de una publicación que no ocurrió y cuyo registro preparado no se pudo borrar: no se convierte en confirmado.
+    Se ve en Registro como provisional, con su zip ausente, y se puede retirar para dejar constancia."""
+    t = corrida_mostrada(app, tmp_path)
+    reportes = app.TRABAJO / "limpios_REPORTES"
+    reportes.mkdir(parents=True, exist_ok=True)
+    resto = reportes / ("revision_rapido_20261112_101010_abcd.json" + app.SUFIJO_PREPARADO)
+    resto.write_text(json.dumps({"estado": "sin_hallazgos", "revisor": "Ana", "fecha": "2026-11-12T10:10:10", "pacientes": t["pacientes"],
+                                 "archivos": dict(t["archivos"]), "zip": {"nombre": "paquete_que_no_existe.zip", "destino": str(tmp_path), "sha256": "0" * 64}}),
+                     encoding="utf-8")
+    assert app.confirmar_evidencias_publicadas() == [] and resto.is_file()
+    fila = app.revisiones_registradas()["corridas"][0]
+    assert fila["provisional"] is True and fila["zip"]["existe"] is False and fila["se_puede_retirar"] is True
+    ret = app.retirar_revision("corrida", "revision_rapido_20261112_101010_abcd.json", "Arturo", "resto de una publicación fallida")
+    assert ret["estado"] == "completa" and ret["paquetes_afectados"][0]["existe"] is False

@@ -48,6 +48,16 @@ El empaquetado de la pestaña Enviar, las retiradas, las corridas del modo rápi
 
 El manifiesto de un paquete de Enviar cita la revisión de cada paciente por el sha256 de su registro (`registro_sha256`). Con ese identificador, y no con la fecha, se reconocen los paquetes que dependen de una revisión cuando se retira. Los manifiestos anteriores a este campo se siguen reconociendo por la fecha de la revisión.
 
+### Evidencias con nombre provisional
+
+El registro de la revisión de una corrida y el manifiesto local de un paquete se escriben con el sufijo `.preparada` antes de publicar el zip, y lo pierden al confirmarse la publicación. Si el zip se publica y ese último renombrado falla, la evidencia se queda con el sufijo. Sigue siendo la evidencia de un paquete publicado, y como tal se trata:
+
+- La corrida aparece en Registro, marcada como registro con nombre provisional, y se puede retirar igual que cualquier otra.
+- Al retirar una revisión, los paquetes cuyo manifiesto quedó provisional entran en la lista de afectados.
+- Al arrancar, al retirar y al pulsar "Terminar las retiradas pendientes", la aplicación termina el renombrado de las evidencias cuyo zip está en su destino con el sha256 anotado. Una evidencia provisional cuyo zip no está allí se deja como está.
+
+La identidad de un registro de corrida es su nombre sin el sufijo, más el sha256 de su contenido; una retirada hecha mientras era provisional lo sigue alcanzando cuando se confirma.
+
 ### Una retirada vale desde que se registra
 
 Cada retirada es un diario, `limpios_REPORTES/retiradas/retirada_<fecha>_<id>.json`. Escribirlo es el punto de compromiso:

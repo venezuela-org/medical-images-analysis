@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -1587,7 +1587,7 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
                 actuales = hashes_paciente(pac)
                 if actuales == {rel.split("/", 1)[1]: h for rel, h in t["archivos"].items() if rel.startswith(pac + "/")}:
                     guardar_revision(pac, "sin_hallazgos", [], revisor, "registrada desde el modo rápido; cubre todos los archivos del paciente",
-                                     origen={"corrida": Path(registro_revision).name}, mostrado=revision["mostrado"], archivos=actuales)
+                                     origen={"corrida": nombre_canonico(Path(registro_revision).name)}, mostrado=revision["mostrado"], archivos=actuales)
                     cubiertos.append(pac)
             except Exception as e:
                 avisos_posteriores.append(f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); el zip publicado y su registro no cambian")
@@ -1987,6 +1987,63 @@ def guardar_revision(pac: str, estado: str, hallazgos: list[str], revisor: str, 
 # cambiar los zips ya exportados: los enumera, para que no se compartan.
 
 REGISTRO_RAPIDO_RE = re.compile(r"^revision_rapido_\d{8}_\d{6}_[0-9a-f]{4}\.json$")
+
+# Una evidencia (registro de corrida o manifiesto local) se escribe con el sufijo .preparada antes de publicar el zip y lo
+# pierde al confirmarse la publicación. Si el zip se publica y ese renombrado falla, la evidencia se queda con el sufijo:
+# sigue siendo la evidencia de un paquete publicado. Por eso todo lo que busca registros de corrida o manifiestos mira
+# también los provisionales, y la identidad de un registro es su nombre canónico, sin el sufijo, más su sha256.
+
+
+def nombre_canonico(nombre: str) -> str:
+    return nombre[:-len(SUFIJO_PREPARADO)] if nombre.endswith(SUFIJO_PREPARADO) else nombre
+
+
+def ruta_de_registro_de_corrida(nombre: str) -> Path | None:
+    """El archivo del registro de una corrida: el confirmado si existe; si no, el provisional."""
+    canonico = nombre_canonico(nombre)
+    for candidato in (carpeta_reportes() / canonico, carpeta_reportes() / (canonico + SUFIJO_PREPARADO)):
+        if candidato.is_file():
+            return candidato
+    return None
+
+
+def registros_de_corrida() -> list[tuple[str, Path]]:
+    """(nombre canónico, archivo) de cada registro de corrida, confirmado o provisional; si están los dos, el confirmado."""
+    carpeta = carpeta_reportes()
+    if not carpeta.is_dir():
+        return []
+    canonicos = {nombre_canonico(p.name) for patron in ("revision_rapido_*.json", "revision_rapido_*.json" + SUFIJO_PREPARADO) for p in carpeta.glob(patron)}
+    return [(c, ruta) for c in sorted(canonicos) if REGISTRO_RAPIDO_RE.match(c) for ruta in [ruta_de_registro_de_corrida(c)] if ruta is not None]
+
+
+def confirmar_evidencias_publicadas() -> list[dict]:
+    """Termina el renombrado de las evidencias provisionales cuyo zip está publicado: existe en su destino con el sha256
+    que la evidencia anota. Las que no se puedan renombrar siguen valiendo como provisionales. No borra nada."""
+    resultados = []
+    candidatos = []
+    if carpeta_reportes().is_dir():
+        candidatos += sorted(carpeta_reportes().glob("revision_rapido_*.json" + SUFIJO_PREPARADO))
+    if (TRABAJO / "paquetes").is_dir():
+        candidatos += sorted((TRABAJO / "paquetes").glob("paquete_*.manifiesto.json" + SUFIJO_PREPARADO))
+    for provisional in candidatos:
+        final = provisional.with_name(nombre_canonico(provisional.name))
+        if final.exists():
+            continue
+        try:
+            z = json.loads(provisional.read_text(encoding="utf-8")).get("zip") or {}
+            zip_ruta = Path(z.get("destino") or "") / (z.get("nombre") or "")
+            publicado = bool(z.get("nombre") and z.get("sha256") and zip_ruta.is_file() and sha256_archivo(zip_ruta) == z["sha256"])
+        except (OSError, ValueError, AttributeError):
+            publicado = False
+        if not publicado:
+            continue
+        try:
+            os.replace(provisional, final)
+            resultados.append({"evidencia": final.name, "estado": "confirmada"})
+            registrar(f"evidencia confirmada tras publicar: {final.name}")
+        except OSError as e:
+            resultados.append({"evidencia": provisional.name, "estado": f"sigue provisional ({type(e).__name__})"})
+    return resultados
 NOTA_RETIRADA = ("Retirar una revisión invalida su estado en la aplicación. No modifica ni elimina los zips ya exportados: "
                  "los paquetes enumerados aquí se crearon con esa revisión y ya no deben compartirse.")
 
@@ -2144,7 +2201,7 @@ def _ruta_diario(d: dict) -> Path:
 
 
 def _retirada_de_corrida(nombre: str) -> Path:
-    return carpeta_reportes() / (nombre[:-5] + ".retirada.json")
+    return carpeta_reportes() / (nombre_canonico(nombre)[:-5] + ".retirada.json")
 
 
 def _sha_de(ruta: Path) -> str | None:
@@ -2164,13 +2221,17 @@ def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
     zips_de_corrida = {(a.get("zip") or {}).get("nombre"): a for a in corridas if (a.get("zip") or {}).get("nombre")}
     encontrados: dict[str, dict] = {}
     carpeta = TRABAJO / "paquetes"
-    for manifiesto in sorted(carpeta.glob("paquete_*.manifiesto.json")) if carpeta.is_dir() else []:
+    # los confirmados primero; después los que quedaron con nombre provisional tras publicarse su zip
+    manifiestos = (sorted(carpeta.glob("paquete_*.manifiesto.json")) + sorted(carpeta.glob("paquete_*.manifiesto.json" + SUFIJO_PREPARADO))) if carpeta.is_dir() else []
+    for manifiesto in manifiestos:
         try:
             m = json.loads(manifiesto.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         z = m.get("zip") or {}
-        nombre = z.get("nombre") or manifiesto.name.replace(".manifiesto.json", ".zip")
+        nombre = z.get("nombre") or nombre_canonico(manifiesto.name).replace(".manifiesto.json", ".zip")
+        if nombre in encontrados:
+            continue
         bloque = m.get("revision_pixeles") or {}
         if "alcance" in bloque:                                       # paquete de una corrida: depende de la revisión de esa corrida
             if nombre not in zips_de_corrida or bloque.get("estado") != "sin_hallazgos":
@@ -2221,7 +2282,10 @@ def _elemento_paciente(pac: str, incluida_por: str) -> dict | None:
 
 
 def _elemento_corrida(nombre: str, incluida_por: str) -> dict | None:
-    ruta = carpeta_reportes() / nombre
+    nombre = nombre_canonico(nombre)
+    ruta = ruta_de_registro_de_corrida(nombre)
+    if ruta is None:
+        return None
     try:
         datos = ruta.read_bytes()
         r = json.loads(datos.decode("utf-8"))
@@ -2257,7 +2321,7 @@ def alcance_de_retirada(tipo: str, identificador: str) -> list[dict]:
         if e is None:
             return []
         alcance[("paciente", identificador)] = e
-        corrida = (e.get("origen") or {}).get("corrida") or ""
+        corrida = nombre_canonico((e.get("origen") or {}).get("corrida") or "")
         if REGISTRO_RAPIDO_RE.match(corrida):
             con_corrida(corrida, f"de ella salió la revisión de {identificador}")
     else:
@@ -2357,7 +2421,8 @@ def _diario_de(tipo: str, identificador: str) -> dict | None:
                 rid = None
             d = next((x for x in diarios_de_retirada() if x["id"] == rid), None) if rid else None
         return d
-    return retirada_que_cubre("corrida", identificador, _sha_de(carpeta_reportes() / identificador))
+    ruta = ruta_de_registro_de_corrida(identificador)
+    return retirada_que_cubre("corrida", nombre_canonico(identificador), _sha_de(ruta) if ruta else None)
 
 
 def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> dict:
@@ -2368,11 +2433,14 @@ def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> 
         raise HTTPException(400, "tipo debe ser paciente o corrida")
     if tipo == "paciente":
         carpeta_paciente(identificador)
-    elif not REGISTRO_RAPIDO_RE.match(identificador):
-        raise HTTPException(400, "identificador de corrida no válido")
+    else:
+        identificador = nombre_canonico(identificador)                # el registro provisional de una corrida publicada es esa misma corrida
+        if not REGISTRO_RAPIDO_RE.match(identificador):
+            raise HTTPException(400, "identificador de corrida no válido")
     if not CANDADO.acquire(blocking=False):
         raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de retirar una revisión")
     try:
+        confirmar_evidencias_publicadas()                              # lo que se publicó y quedó con nombre provisional, se termina aquí si se puede
         bloqueo = estado_de_retiradas()
         if bloqueo["bloqueo"]:
             raise HTTPException(409, "no se puede verificar el estado de las retiradas (" + texto_de_problemas(bloqueo["problemas"]) + "); "
@@ -2410,7 +2478,7 @@ def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> 
             raise HTTPException(500, f"no se pudo registrar la retirada ({type(e).__name__}); no se ha retirado nada")
         registrar(f"retirada {diario['id']}: comprometida por {quien}; alcanza {', '.join(a['tipo'] + ' ' + a['id'] for a in alcance)}")
         for t in TRABAJOS.values():                                   # la corrida abierta en pantalla, si es una de estas
-            if t.get("nombre") == "rapido" and Path(str(t.get("registro_revision", ""))).name in {a["id"] for a in alcance if a["tipo"] == "corrida"}:
+            if t.get("nombre") == "rapido" and nombre_canonico(Path(str(t.get("registro_revision", ""))).name) in {a["id"] for a in alcance if a["tipo"] == "corrida"}:
                 t["revision_retirada"] = diario["retirada"]
         return {**completar_retirada(diario), "reanudada": False}
     finally:
@@ -2457,9 +2525,7 @@ def revisiones_registradas() -> dict:
                           "origen": r.get("origen"), "retirada": r.get("retirada"), "paquetes_afectados": r.get("paquetes_afectados", []),
                           "se_puede_retirar": not bloqueo and (r.get("estado") in ("sin_hallazgos", "con_hallazgos")
                                                                or str(r.get("detalle", "")).startswith("invalidada"))})
-    for ruta in sorted(carpeta.glob("revision_rapido_*.json")) if carpeta.is_dir() else []:
-        if not REGISTRO_RAPIDO_RE.match(ruta.name):
-            continue
+    for canonico, ruta in registros_de_corrida():
         try:
             datos = ruta.read_bytes()
             r = json.loads(datos.decode("utf-8"))
@@ -2467,10 +2533,11 @@ def revisiones_registradas() -> dict:
             continue
         huella = hashlib.sha256(datos).hexdigest()
         diario = None if bloqueo else next((d for d in estado["diarios"] for a in d["alcance"]
-                                            if a.get("tipo") == "corrida" and a.get("id") == ruta.name and a.get("sha256") == huella), None)
+                                            if a.get("tipo") == "corrida" and a.get("id") == canonico and a.get("sha256") == huella), None)
         z = r.get("zip") or {}
         zip_ruta = Path(z.get("destino") or "") / (z.get("nombre") or "")
-        corridas.append({"registro": ruta.name, "revisor": r.get("revisor"), "fecha": r.get("fecha"), "pacientes": r.get("pacientes", []),
+        corridas.append({"registro": canonico, "provisional": ruta.name != canonico,
+                         "revisor": r.get("revisor"), "fecha": r.get("fecha"), "pacientes": r.get("pacientes", []),
                          "archivos": len(r.get("archivos", {})), "mostrado": r.get("mostrado"),
                          "zip": {"nombre": z.get("nombre"), "destino": z.get("destino"), "existe": zip_ruta.is_file() if z.get("nombre") else False},
                          "retirada": (diario or {}).get("retirada"), "paquetes_afectados": (diario or {}).get("paquetes_afectados", []),
@@ -2561,6 +2628,7 @@ def retirar(request: Request, cuerpo: dict):
 def reanudar(request: Request):
     """Termina las retiradas que quedaron comprometidas e incompletas."""
     auth(request)
+    confirmar_evidencias_publicadas()
     estado = estado_de_retiradas()
     return {"resultados": reanudar_retiradas(), "incompletas": len(retiradas_incompletas()),
             "diarios_con_problemas": estado["problemas"], "retiradas_no_verificables": estado["bloqueo"]}
@@ -3135,7 +3203,7 @@ async function cargarRevisiones() {
   let r;
   try { r = await api('revisiones'); } catch (err) { mensaje('#revisiones-estado', 'error', err.message); return; }
   const filas = [];
-  for (const c of r.corridas) filas.push({tipo: 'corrida', id: c.registro, alcance: 'Corrida · ' + c.pacientes.join(', '),
+  for (const c of r.corridas) filas.push({tipo: 'corrida', id: c.registro, alcance: 'Corrida · ' + c.pacientes.join(', ') + (c.provisional ? ' (registro con nombre provisional)' : ''),
     estado: c.no_verificable ? ['aviso', '! no se puede verificar si está retirada'] : (c.retirada ? ['aviso', '! retirada el ' + c.retirada.fecha + ' por ' + c.retirada.quien + ': ' + c.retirada.motivo] : ['ok', '✓ registrada, sin hallazgos']),
     quien: (c.revisor || '') + ' · ' + (c.fecha || ''), archivos: c.archivos + (c.mostrado ? ' (' + c.mostrado.cuadros_mostrados + ' cuadros mostrados)' : ''),
     paquete: c.zip && c.zip.nombre ? c.zip.nombre + (c.zip.existe ? ' · sigue en ' + c.zip.destino : ' · ya no está en ' + c.zip.destino) : '', retirable: c.se_puede_retirar});
@@ -3250,6 +3318,7 @@ def main() -> None:
     print("Preparando el índice de estudios; con muchos archivos tarda unos segundos... (indexing studies)", flush=True)
     indexar()
     try:
+        confirmar_evidencias_publicadas()
         problemas = estado_de_retiradas()
         if problemas["problemas"]:
             print("ATENCIÓN: hay diarios de retirada que requieren atención: " + texto_de_problemas(problemas["problemas"]) + "."
