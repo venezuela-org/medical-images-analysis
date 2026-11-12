@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -1742,8 +1742,13 @@ def leer_revision(pac: str) -> dict:
         return {"estado": "pendiente", "vigente": False, "lista_para_compartir": False, "detalle": "registro ilegible"}
     # Una retirada comprometida manda sobre el registro, aunque el registro todavía no se haya actualizado: en cuanto la
     # retirada existe, esa revisión deja de autorizar que se comparta nada.
-    diario = retirada_que_cubre("paciente", pac, hashlib.sha256(datos).hexdigest())
-    if diario is not None and r.get("estado") != "retirada":
+    if r.get("estado") == "retirada":                                 # el propio registro ya lo dice; no hace falta ningún diario
+        return evaluar_registro_revision(r, {})
+    try:
+        diario = retirada_que_cubre("paciente", pac, hashlib.sha256(datos).hexdigest())
+    except RetiradasNoVerificables as e:
+        return revision_no_verificable(pac, e.problemas)
+    if diario is not None:
         ret = diario["retirada"]
         return {"paciente": pac, "estado": "retirada", "vigente": False, "lista_para_compartir": False,
                 "detalle": f"revisión retirada el {ret['fecha']} por {ret['quien']}: {ret['motivo']} (su registro está pendiente de actualizar)",
@@ -1840,21 +1845,116 @@ def carpeta_retiradas() -> Path:
     return carpeta_reportes() / "retiradas"
 
 
-def diarios_de_retirada() -> list[dict]:
+class RetiradasNoVerificables(Exception):
+    """Hay algún diario de retirada cuyo alcance no se puede determinar: no se puede leer, no es JSON válido, su estructura
+    no es válida o la carpeta de retiradas no se deja listar. No es lo mismo que "no hay ninguna retirada": mientras dure,
+    no se puede afirmar que una revisión siga valiendo."""
+
+    def __init__(self, problemas: list[dict]):
+        self.problemas = problemas
+        super().__init__(texto_de_problemas(problemas))
+
+
+def texto_de_problemas(problemas: list[dict]) -> str:
+    return "; ".join(f"{p['diario']}: {p['motivo']}" for p in problemas)
+
+
+ACCIONES_DE_RETIRADA = ("anotar_corrida", "archivar_original", "sustituir_registro")
+
+
+def _alcance_legible(d) -> bool:
+    """¿Se puede saber con seguridad a qué registros alcanza este diario?"""
+    if not isinstance(d, dict) or not isinstance(d.get("alcance"), list) or not d["alcance"]:
+        return False
+    return all(isinstance(a, dict) and a.get("tipo") in ("paciente", "corrida") and isinstance(a.get("id"), str) and a["id"]
+               and isinstance(a.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", a["sha256"]) for a in d["alcance"])
+
+
+def _defecto_de_diario(d, nombre: str) -> str | None:
+    """Qué le falta a un diario para ser válido, o None si lo es."""
+    if not isinstance(d, dict):
+        return "no es un objeto"
+    if not isinstance(d.get("id"), str) or not d["id"]:
+        return "falta el identificador"
+    if nombre != f"retirada_{d['id']}.json":
+        return "el identificador no corresponde al nombre del archivo"
+    ret = d.get("retirada")
+    if not isinstance(ret, dict) or not all(isinstance(ret.get(k), str) and ret[k] for k in ("quien", "fecha", "motivo")):
+        return "falta quién retiró, cuándo o por qué"
+    if not _alcance_legible(d):
+        return "el alcance falta o no es válido"
+    acciones = d.get("acciones")
+    if not isinstance(acciones, list) or not all(isinstance(a, dict) and a.get("accion") in ACCIONES_DE_RETIRADA and isinstance(a.get("id"), str)
+                                                 and a.get("estado") in ("pendiente", "hecha") and isinstance(a.get("descripcion"), str) for a in acciones):
+        return "la lista de acciones falta o no es válida"
+    return None
+
+
+def estado_de_retiradas() -> dict:
+    """Lee todos los diarios de retirada sin dar nada por supuesto. Devuelve:
+      diarios    los que se pueden usar: los válidos y los que tienen algún defecto pero un alcance legible
+                 (estos llevan '_requiere_atencion' y no se pueden terminar hasta que se arreglen);
+      problemas  cada diario, o la carpeta, que requiere atención, con el motivo y si su alcance se conoce;
+      bloqueo    True si hay algo cuyo alcance no se puede determinar. Entonces no se sabe qué revisiones están
+                 retiradas, y ninguna puede autorizar que se comparta nada hasta que se resuelva.
+    No lanza. Que la carpeta no exista significa que no hay retiradas; cualquier otro fallo al listarla es un problema."""
     carpeta = carpeta_retiradas()
-    out = []
-    for ruta in sorted(carpeta.glob("retirada_*.json")) if carpeta.is_dir() else []:
+    try:
+        nombres = sorted(os.listdir(carpeta))
+    except FileNotFoundError:
+        return {"diarios": [], "problemas": [], "bloqueo": False}
+    except OSError as e:
+        return {"diarios": [], "bloqueo": True,
+                "problemas": [{"diario": "retiradas/", "motivo": f"no se puede listar la carpeta de retiradas ({type(e).__name__})", "alcance_conocido": False}]}
+    diarios, problemas = [], []
+    for nombre in nombres:
+        if not (nombre.startswith("retirada_") and nombre.endswith(".json")):
+            continue                                                  # temporales de una escritura y cualquier otro archivo
         try:
-            d = json.loads(ruta.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            datos = (carpeta / nombre).read_bytes()
+        except OSError as e:
+            problemas.append({"diario": nombre, "motivo": f"no se puede leer ({type(e).__name__})", "alcance_conocido": False})
             continue
-        if isinstance(d, dict) and d.get("id") and isinstance(d.get("alcance"), list) and isinstance(d.get("retirada"), dict):
-            out.append(d)
-    return out
+        try:
+            d = json.loads(datos.decode("utf-8"))
+        except ValueError:                                            # incluye UnicodeDecodeError
+            problemas.append({"diario": nombre, "motivo": "su contenido no es JSON válido", "alcance_conocido": False})
+            continue
+        defecto = _defecto_de_diario(d, nombre)
+        if defecto is None:
+            diarios.append(d)
+        elif _alcance_legible(d):
+            # se sabe a qué alcanza: sigue retirando esos registros, pero no se puede terminar ni mostrar entero
+            ret = d.get("retirada") if isinstance(d.get("retirada"), dict) else {}
+            diarios.append({**d, "id": d.get("id") if isinstance(d.get("id"), str) and d.get("id") else nombre[len("retirada_"):-5],
+                            "retirada": {"quien": str(ret.get("quien") or "desconocido"), "fecha": str(ret.get("fecha") or "desconocida"),
+                                         "motivo": str(ret.get("motivo") or "no consta")},
+                            "acciones": [], "_requiere_atencion": defecto, "_archivo": nombre})
+            problemas.append({"diario": nombre, "motivo": f"estructura no válida ({defecto}); su alcance se conoce y sigue retirado", "alcance_conocido": True})
+        else:
+            problemas.append({"diario": nombre, "motivo": f"estructura no válida ({defecto})", "alcance_conocido": False})
+    return {"diarios": diarios, "problemas": problemas, "bloqueo": any(not p["alcance_conocido"] for p in problemas)}
+
+
+def diarios_de_retirada() -> list[dict]:
+    """Los diarios de retirada, solo si el estado de las retiradas se puede verificar entero. Si no, lanza
+    RetiradasNoVerificables: quien pregunta si una revisión está retirada no puede recibir un "no" por omisión."""
+    estado = estado_de_retiradas()
+    if estado["bloqueo"]:
+        raise RetiradasNoVerificables(estado["problemas"])
+    return estado["diarios"]
+
+
+def revision_no_verificable(pac: str, problemas: list[dict]) -> dict:
+    return {"paciente": pac, "estado": "no_verificable", "vigente": False, "lista_para_compartir": False,
+            "detalle": ("no se puede verificar si esta revisión fue retirada (" + texto_de_problemas(problemas) + "); "
+                        "hasta que ese diario se pueda leer, ninguna revisión autoriza compartir"),
+            "diarios_con_problemas": problemas}
 
 
 def retirada_que_cubre(tipo: str, identificador: str, huella: str | None) -> dict | None:
-    """El diario de retirada que alcanza exactamente ese registro (mismo tipo, mismo identificador, mismo contenido)."""
+    """El diario de retirada que alcanza exactamente ese registro (mismo tipo, mismo identificador, mismo contenido), o
+    None si ninguno lo alcanza. Lanza RetiradasNoVerificables si no se puede saber."""
     for d in diarios_de_retirada():
         for a in d["alcance"]:
             if a.get("tipo") == tipo and a.get("id") == identificador and a.get("sha256") == huella:
@@ -2090,8 +2190,16 @@ def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> 
     if not CANDADO.acquire(blocking=False):
         raise HTTPException(409, "hay otro trabajo en curso; espera a que termine antes de retirar una revisión")
     try:
+        bloqueo = estado_de_retiradas()
+        if bloqueo["bloqueo"]:
+            raise HTTPException(409, "no se puede verificar el estado de las retiradas (" + texto_de_problemas(bloqueo["problemas"]) + "); "
+                                     "mientras tanto ninguna revisión autoriza compartir, y no se puede retirar ni terminar nada "
+                                     "hasta que ese diario se pueda leer")
         existente = _diario_de(tipo, identificador)
         if existente is not None:
+            if existente.get("_requiere_atencion"):
+                raise HTTPException(409, f"esa revisión ya está retirada, pero su diario requiere atención ({existente['_archivo']}: "
+                                         f"{existente['_requiere_atencion']}); no se puede terminar hasta que se arregle")
             if all(a["estado"] == "hecha" for a in existente["acciones"]):
                 raise HTTPException(409, "esa revisión ya está retirada")
             # reintento: se termina la misma retirada. Quién la retiró, cuándo y por qué no cambian; el reintento se anota.
@@ -2127,7 +2235,10 @@ def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> 
 
 
 def retiradas_incompletas() -> list[dict]:
-    return [d for d in diarios_de_retirada() if any(a.get("estado") != "hecha" for a in d.get("acciones", []))]
+    """Las retiradas comprometidas que se pueden terminar: diarios válidos con acciones pendientes. Los diarios con
+    problemas no están aquí; estado_de_retiradas() los enumera aparte."""
+    return [d for d in estado_de_retiradas()["diarios"]
+            if not d.get("_requiere_atencion") and any(a.get("estado") != "hecha" for a in d.get("acciones", []))]
 
 
 def reanudar_retiradas() -> list[dict]:
@@ -2147,9 +2258,11 @@ def reanudar_retiradas() -> list[dict]:
 
 
 def revisiones_registradas() -> dict:
-    """Lo que hay registrado: la revisión de cada paciente y la de cada corrida, con su estado, los paquetes afectados y
-    las retiradas que quedaron a medias."""
+    """Lo que hay registrado: la revisión de cada paciente y la de cada corrida, con su estado y los paquetes afectados;
+    las retiradas que quedaron a medias; y los diarios de retirada que requieren atención."""
     carpeta = carpeta_reportes()
+    estado = estado_de_retiradas()
+    bloqueo = estado["bloqueo"]
     pacientes, corridas = [], []
     for ruta in sorted(carpeta.glob("revision_pixeles_*.json")) if carpeta.is_dir() else []:
         pac = ruta.stem.replace("revision_pixeles_", "")
@@ -2159,7 +2272,8 @@ def revisiones_registradas() -> dict:
         pacientes.append({"paciente": pac, "estado": r.get("estado"), "vigente": r.get("vigente"), "detalle": r.get("detalle"),
                           "revisor": r.get("revisor"), "fecha": r.get("fecha"), "archivos": r.get("archivos_revisados"),
                           "origen": r.get("origen"), "retirada": r.get("retirada"), "paquetes_afectados": r.get("paquetes_afectados", []),
-                          "se_puede_retirar": r.get("estado") in ("sin_hallazgos", "con_hallazgos") or str(r.get("detalle", "")).startswith("invalidada")})
+                          "se_puede_retirar": not bloqueo and (r.get("estado") in ("sin_hallazgos", "con_hallazgos")
+                                                               or str(r.get("detalle", "")).startswith("invalidada"))})
     for ruta in sorted(carpeta.glob("revision_rapido_*.json")) if carpeta.is_dir() else []:
         if not REGISTRO_RAPIDO_RE.match(ruta.name):
             continue
@@ -2168,18 +2282,21 @@ def revisiones_registradas() -> dict:
             r = json.loads(datos.decode("utf-8"))
         except (OSError, ValueError):
             continue
-        diario = retirada_que_cubre("corrida", ruta.name, hashlib.sha256(datos).hexdigest())
+        huella = hashlib.sha256(datos).hexdigest()
+        diario = None if bloqueo else next((d for d in estado["diarios"] for a in d["alcance"]
+                                            if a.get("tipo") == "corrida" and a.get("id") == ruta.name and a.get("sha256") == huella), None)
         z = r.get("zip") or {}
         zip_ruta = Path(z.get("destino") or "") / (z.get("nombre") or "")
         corridas.append({"registro": ruta.name, "revisor": r.get("revisor"), "fecha": r.get("fecha"), "pacientes": r.get("pacientes", []),
                          "archivos": len(r.get("archivos", {})), "mostrado": r.get("mostrado"),
                          "zip": {"nombre": z.get("nombre"), "destino": z.get("destino"), "existe": zip_ruta.is_file() if z.get("nombre") else False},
                          "retirada": (diario or {}).get("retirada"), "paquetes_afectados": (diario or {}).get("paquetes_afectados", []),
-                         "se_puede_retirar": diario is None})
+                         "no_verificable": bloqueo, "se_puede_retirar": diario is None and not bloqueo})
     incompletas = [{"retirada": d["id"], "quien": d["retirada"]["quien"], "fecha": d["retirada"]["fecha"], "motivo": d["retirada"]["motivo"],
                     "solicitada": d.get("solicitada"), "completadas": [a["descripcion"] for a in d["acciones"] if a["estado"] == "hecha"],
                     "pendientes": [a["descripcion"] for a in d["acciones"] if a["estado"] != "hecha"]} for d in retiradas_incompletas()]
-    return {"pacientes": pacientes, "corridas": corridas, "retiradas_incompletas": incompletas, "nota": NOTA_RETIRADA}
+    return {"pacientes": pacientes, "corridas": corridas, "retiradas_incompletas": incompletas,
+            "diarios_con_problemas": estado["problemas"], "retiradas_no_verificables": bloqueo, "nota": NOTA_RETIRADA}
 
 
 @api.get("/revision/{pac}")
@@ -2238,7 +2355,9 @@ def retirar(request: Request, cuerpo: dict):
 def reanudar(request: Request):
     """Termina las retiradas que quedaron comprometidas e incompletas."""
     auth(request)
-    return {"resultados": reanudar_retiradas(), "incompletas": len(retiradas_incompletas())}
+    estado = estado_de_retiradas()
+    return {"resultados": reanudar_retiradas(), "incompletas": len(retiradas_incompletas()),
+            "diarios_con_problemas": estado["problemas"], "retiradas_no_verificables": estado["bloqueo"]}
 
 
 @api.get("/registro")
@@ -2346,6 +2465,7 @@ HTML = """<!doctype html>
   <h2>Revisiones de píxeles registradas</h2>
   <p class="suave">Una revisión se puede retirar: el registro original se conserva, y una retirada con tu nombre, la fecha y el motivo lo sustituye. Retirar no cambia los zips ya exportados; la lista de paquetes afectados dice cuáles ya no deben compartirse.</p>
   <div id="revisiones-estado"></div>
+  <div id="diarios-problemas"></div>
   <div id="retiradas-a-medias" class="oculto"><div id="retiradas-a-medias-texto"></div><div class="fila"><button id="btn-reanudar">Terminar las retiradas pendientes</button></div></div>
   <div class="tabla-marco"><table id="tabla-revisiones"><thead><tr><th>Alcance</th><th>Estado</th><th>Quién y cuándo</th><th>Archivos</th><th>Paquete</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="retirar-form" class="oculto">
@@ -2806,7 +2926,7 @@ async function cargarRevisiones() {
   try { r = await api('revisiones'); } catch (err) { mensaje('#revisiones-estado', 'error', err.message); return; }
   const filas = [];
   for (const c of r.corridas) filas.push({tipo: 'corrida', id: c.registro, alcance: 'Corrida · ' + c.pacientes.join(', '),
-    estado: c.retirada ? ['aviso', '! retirada el ' + c.retirada.fecha + ' por ' + c.retirada.quien + ': ' + c.retirada.motivo] : ['ok', '✓ registrada, sin hallazgos'],
+    estado: c.no_verificable ? ['aviso', '! no se puede verificar si está retirada'] : (c.retirada ? ['aviso', '! retirada el ' + c.retirada.fecha + ' por ' + c.retirada.quien + ': ' + c.retirada.motivo] : ['ok', '✓ registrada, sin hallazgos']),
     quien: (c.revisor || '') + ' · ' + (c.fecha || ''), archivos: c.archivos + (c.mostrado ? ' (' + c.mostrado.cuadros_mostrados + ' cuadros mostrados)' : ''),
     paquete: c.zip && c.zip.nombre ? c.zip.nombre + (c.zip.existe ? ' · sigue en ' + c.zip.destino : ' · ya no está en ' + c.zip.destino) : '', retirable: c.se_puede_retirar});
   for (const p of r.pacientes) filas.push({tipo: 'paciente', id: p.paciente, alcance: 'Paciente · ' + p.paciente,
@@ -2814,6 +2934,11 @@ async function cargarRevisiones() {
     quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
     paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', '), retirable: p.se_puede_retirar});
   mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
+  const prob = r.diarios_con_problemas || [];
+  mensaje('#diarios-problemas', r.retiradas_no_verificables ? 'error' : 'aviso', !prob.length ? '' :
+    (r.retiradas_no_verificables ? 'No se puede verificar el estado de las retiradas. Requiere atención: ' + prob.map(x => x.diario + ' (' + x.motivo + ')').join('; ') +
+      '. Hasta que ese diario se pueda leer, ninguna revisión autoriza compartir y no se puede retirar ni terminar nada. Ningún registro se ha tocado; cuando el diario vuelva a leerse, todo sigue donde estaba.'
+      : 'Diarios de retirada que requieren atención: ' + prob.map(x => x.diario + ' (' + x.motivo + ')').join('; ') + '.'));
   const medias = r.retiradas_incompletas || [];
   $('#retiradas-a-medias').classList.toggle('oculto', medias.length === 0);
   mensaje('#retiradas-a-medias-texto', 'aviso', medias.length ? medias.map(m => 'Retirada de ' + m.fecha + ' por ' + m.quien + ' (' + m.motivo + '): registrada, y sus revisiones ya no valen; falta ' + m.pendientes.join('; ') + '.').join(' ') : '');
@@ -2915,6 +3040,11 @@ def main() -> None:
     print("Preparando el índice de estudios; con muchos archivos tarda unos segundos... (indexing studies)", flush=True)
     indexar()
     try:
+        problemas = estado_de_retiradas()
+        if problemas["problemas"]:
+            print("ATENCIÓN: hay diarios de retirada que requieren atención: " + texto_de_problemas(problemas["problemas"]) + "."
+                  + (" Hasta que se puedan leer, ninguna revisión autoriza compartir." if problemas["bloqueo"] else ""), flush=True)
+            registrar("retiradas: diarios que requieren atención: " + texto_de_problemas(problemas["problemas"]))
         a_medias = len(retiradas_incompletas())
         if a_medias:
             reanudar_retiradas()

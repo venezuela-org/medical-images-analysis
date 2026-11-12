@@ -56,3 +56,19 @@ Si falla alguno de los pasos posteriores, la retirada queda registrada e incompl
 Si, con una retirada a medias, alguien registra una revisión nueva de ese paciente, es otro registro: la retirada no lo alcanza, y al terminarla no se toca.
 
 Los registros se escriben de forma atómica: en disco queda el anterior entero o el nuevo entero.
+
+### Cuando el estado de las retiradas no se puede verificar
+
+"No hay ninguna retirada" y "no se puede saber si la hay" son situaciones distintas, y la aplicación las trata distinto. Si un diario de retirada no se puede leer, su contenido no es JSON válido, su estructura no es válida, o la carpeta `retiradas/` no se deja listar, la aplicación no puede saber a qué revisiones alcanza. En ese caso:
+
+- Ninguna revisión autoriza que se comparta. Su estado pasa a "no verificable", con el nombre del diario que requiere atención y el motivo. Vale para todos los pacientes, también para los que nada tienen que ver con esa retirada, porque no se puede saber a quién alcanza.
+- Un paquete nuevo marca a esos pacientes como pendientes, y su manifiesto lo dice.
+- La pestaña Registro muestra qué diario requiere atención. No se puede retirar ni terminar ninguna retirada hasta resolverlo.
+- Al arrancar, la aplicación lo avisa en la terminal y sigue funcionando.
+- Ningún registro se toca. Cuando el diario vuelve a poder leerse, todo sigue donde estaba: la retirada comprometida, lo que le faltaba por hacer y las revisiones de los demás.
+
+Si un diario tiene algún defecto pero su alcance se lee bien, sigue retirando exactamente esos registros, aparece en Registro como diario que requiere atención y no se puede terminar hasta arreglarlo; las revisiones de los demás pacientes siguen valiendo.
+
+Que la carpeta `retiradas/` no exista significa que no hay retiradas. Un registro de paciente que ya dice "retirada" lo sigue diciendo aunque su diario deje de poder leerse.
+
+Lo que esto no cubre: si alguien borra el diario de una retirada que quedó a medias, la aplicación no tiene cómo saber que existió. Una retirada terminada deja además su anotación junto a la corrida y el registro de retirada de cada paciente; una interrumpida solo tiene el diario hasta que se termina.
