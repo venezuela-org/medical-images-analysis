@@ -497,3 +497,115 @@ def test_el_visor_rechaza_un_archivo_que_ya_no_esta(app, tmp_path):
     with pytest.raises(Exception) as e:
         app.png_de_corrida(t, 0, 1, "tejido")
     assert e.value.status_code == 409
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# revisión del 11 de noviembre de 2026, séptima ronda
+# ---------------------------------------------------------------------------------------------------------------
+
+ENHANCED_CT = "1.2.840.10008.5.1.4.1.1.2.1"
+
+
+def caso_con_archivo_de_dos_cuadros(tmp_path: Path) -> Path:
+    """Caso sintético de 4 + 4 cortes más una serie con un solo archivo Enhanced CT de dos cuadros distintos."""
+    d = tmp_path / "estudios" / "multicuadro"
+    demo.escribir_caso(d, 4, 1)
+    ds = pydicom.dcmread(d / "SE0" / "IM0")
+    ds.SOPClassUID = ENHANCED_CT
+    ds.file_meta.MediaStorageSOPClassUID = ENHANCED_CT
+    ds.SOPInstanceUID = pydicom.uid.generate_uid()
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.SeriesInstanceUID = pydicom.uid.generate_uid()
+    ds.SeriesNumber = 7
+    ds.NumberOfFrames = 2
+    primero = ds.PixelData
+    ds.PixelData = primero + bytes(255 - b for b in primero)          # el segundo cuadro es visiblemente distinto
+    (d / "SE2").mkdir()
+    ds.save_as(d / "SE2" / "MF0", enforce_file_format=True)
+    return d
+
+
+def test_un_archivo_con_varios_cuadros_se_puede_recorrer_en_el_visor_de_la_corrida(app, tmp_path):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    t = correr(app, caso_con_archivo_de_dos_cuadros(tmp_path), destino)
+    assert t["zip"], t["mensaje"]
+    indice = next(i for i, s in enumerate(t["series_corrida"]) if s["cuadros"] == [2])
+    assert all(s["cuadros"] == [1] * s["n"] for i, s in enumerate(t["series_corrida"]) if i != indice)
+    uno, dos = app.png_de_corrida(t, indice, 1, "tejido", 1), app.png_de_corrida(t, indice, 1, "tejido", 2)
+    assert uno[:8] == dos[:8] == b"\x89PNG\r\n\x1a\n" and uno != dos                   # los dos cuadros se dibujan, y son distintos
+    with pytest.raises(Exception) as fuera:
+        app.png_de_corrida(t, indice, 1, "tejido", 3)
+    assert fuera.value.status_code == 404
+    assert t["no_mostrables"] == [] and "varios cuadros" in next(p for p in t["pasos"] if p["clave"] == "paquete")["resumen"]
+    r = app.aplicar_revision_rapido(t, "Prueba")                                          # todo se pudo ver: la revisión se registra
+    assert Path(r["zip"]).parent == destino
+    app.indexar()
+    assert max(s["cuadros_max"] for s in app.INDICE.values()) == 2
+
+
+def test_una_imagen_que_el_visor_no_puede_dibujar_bloquea_la_revision(app, tmp_path, monkeypatch):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    real = app.render_bytes
+
+    def sin_soporte_para_varios_cuadros(datos, ventana, cuadro=1):
+        if int(pydicom.dcmread(io.BytesIO(datos), stop_before_pixels=True).get("NumberOfFrames", 1) or 1) > 1:
+            raise app.ImagenNoMostrable("formato de imagen no soportado")
+        return real(datos, ventana, cuadro)
+
+    monkeypatch.setattr(app, "render_bytes", sin_soporte_para_varios_cuadros)
+    t = correr(app, caso_con_archivo_de_dos_cuadros(tmp_path), destino)
+    assert t["zip"] and t["estado"] == "con avisos"                                       # el zip pendiente existe, en local
+    assert len(t["no_mostrables"]) >= 1 and t["no_mostrables"][0]["motivo"] == "formato de imagen no soportado"
+    paquete = next(p for p in t["pasos"] if p["clave"] == "paquete")
+    assert paquete["estado"] == "aviso" and "no se pueden mostrar en el visor" in paquete["resumen"]
+    indice = next(i for i, s in enumerate(t["series_corrida"]) if s["cuadros"] == [2])
+    with pytest.raises(Exception) as e:
+        app.png_de_corrida(t, indice, 1, "tejido", 1)
+    assert e.value.status_code == 422 and "no se puede mostrar" in e.value.detail
+    with pytest.raises(Exception) as e:                                                   # sin verla, no hay revisión
+        app.aplicar_revision_rapido(t, "Prueba")
+    assert e.value.status_code == 409 and "no se puede registrar una revisión de píxeles sin verlas" in e.value.detail
+    assert list(destino.iterdir()) == [] and t["revisado"] is False and Path(t["zip"]).exists()
+
+
+def test_un_fallo_al_dibujar_durante_la_revision_tambien_la_bloquea(app, tmp_path, monkeypatch):
+    destino = tmp_path / "destino"
+    destino.mkdir()
+    t = correr(app, caso_mezclado(tmp_path), destino)
+    assert t["no_mostrables"] == []
+
+    def rota(datos, ventana, cuadro=1):
+        raise app.ImagenNoMostrable("no se pudieron decodificar los píxeles (ValueError)")
+
+    monkeypatch.setattr(app, "render_bytes", rota)                                        # el corte 7 no se deja dibujar
+    with pytest.raises(Exception) as e:
+        app.png_de_corrida(t, 0, 7, "tejido")
+    assert e.value.status_code == 422
+    assert [x["archivo"] for x in t["no_mostrables"]] == [t["series_corrida"][0]["nombres"][6]]
+    with pytest.raises(Exception) as e:
+        app.aplicar_revision_rapido(t, "Prueba")
+    assert e.value.status_code == 409 and list(destino.iterdir()) == []
+
+
+def test_un_pet_en_cuarentena_no_cuenta_como_faltante_en_el_suv_de_la_corrida(app, tmp_path):
+    """Un corte PET con BurnedInAnnotation=YES va a cuarentena. Los demás forman la corrida; su comparación de SUV no
+    debe tomar el corte en cuarentena por un original sin archivo limpio."""
+    def uno_con_texto_grabado(serie, i, ds):
+        if serie == "SE1" and i == 3:
+            ds.BurnedInAnnotation = "YES"
+    c = caso_mezclado(tmp_path, editar=uno_con_texto_grabado)
+    t = correr(app, c, tmp_path)
+    pasos = {p["clave"]: p for p in t["pasos"]}
+    assert pasos["limpieza"]["estado"] == "aviso" and "1 en cuarentena" in pasos["limpieza"]["resumen"]
+    assert pasos["cotejo"]["estado"] == "ok" and "coinciden byte a byte: 23" in pasos["cotejo"]["resumen"]
+    assert pasos["suv"]["estado"] == "ok" and "IDENTICO" in pasos["suv"]["resumen"], pasos["suv"]["resumen"]
+    assert len(t["archivos"]) == 2 * N - 1 and t["zip"]
+    # sin conjunto, la comparación general sigue viendo la serie original entera y marca el faltante
+    suv = cargar("suv_herramienta", RAIZ / "herramientas" / "suv.py")
+    serie_pet = next(app.TRABAJO / "limpios" / s["serie"] for s in t["series_corrida"] if s["modalidad"] == "PT")
+    informe = app.TRABAJO / "suv_general.json"
+    codigo = suv.main(["comparar", str(serie_pet), "--privado", str(app.TRABAJO / "limpios_PRIVADO"), "--json", str(informe)])
+    r = json.loads(informe.read_text(encoding="utf-8"))
+    assert codigo == 1 and r["correspondencia_completa"] is False and r["cortes_serie_original"] == N

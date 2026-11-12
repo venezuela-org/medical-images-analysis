@@ -37,6 +37,12 @@ Cuando no se puede calcular, la etiqueta dice "edad no disponible" y el aviso da
 
 Si no hay edad calculada pero los archivos traen `PatientAge`, se muestra esa edad con su nombre: "54 años (edad informada por el equipo)". Es un dato que escribió el equipo, no un cálculo de esta aplicación. Si hay edad calculada y la informada no coincide, se muestra la calculada y un aviso.
 
+## Originales repetidos
+
+Dos archivos originales pueden dar el mismo archivo limpio: la fecha de nacimiento se vacía al limpiar, así que dos copias de una instancia con nacimientos distintos quedan idénticas. La limpieza guarda lo que dice cada original, y si no coinciden el estudio muestra el conflicto ("edad no disponible: los archivos del estudio dan edades distintas"). Una copia que difiere en el sexo es otro contenido para la misma instancia: va a cuarentena, no entra en ningún paquete, y el estudio guardado muestra "sexo en conflicto".
+
+Al volver a importar una carpeta, lo que digan sus originales sustituye a lo guardado para esos archivos. Así se corrige un dato en origen sin arrastrar el anterior.
+
 ## Qué cambia en la política de anonimización
 
 Nada en los archivos limpios. La política `pet-ct-local/0.4` ya conservaba el sexo, el peso, la talla y la edad informada (opción *Retain Patient Characteristics*), vaciaba la fecha de nacimiento y desplazaba las fechas. Eso sigue igual: los archivos limpios no llevan ningún dato nuevo, sus bytes no cambian y las revisiones de píxeles registradas siguen vigentes.

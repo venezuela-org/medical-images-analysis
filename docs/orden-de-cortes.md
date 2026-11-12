@@ -44,6 +44,8 @@ La correspondencia de nombres se calcula una vez, sobre los archivos exactos de 
 
 La revisión de píxeles de una corrida se hace en el visor de la propia pestaña Rápido, "Los archivos de este paquete, en su orden". Ese visor muestra exactamente los archivos de la corrida, serie por serie, en el orden congelado, con el nombre exportado de cada corte; y se niega a mostrar un archivo que haya cambiado desde la corrida. Para ello lee cada archivo una sola vez, comprueba el hash de esos bytes y dibuja la imagen desde esos mismos bytes. La pestaña Estudios muestra todo lo guardado del paciente, que puede ser más y, como en el ejemplo anterior, puede ordenarse con otro criterio: sirve para explorar, y el visor de la corrida es el que corresponde al paquete.
 
+Un archivo Enhanced puede llevar varios cuadros. En el visor de la corrida cada archivo sigue siendo un corte de la lista, y un segundo deslizador recorre sus cuadros. Si alguna imagen no se puede dibujar, la corrida lo indica y su revisión de píxeles no se puede registrar. La pestaña Estudios muestra el primer cuadro de cada archivo y lo avisa.
+
 En la pestaña Enviar, el paquete lleva las series guardadas enteras, el mismo conjunto que muestra Estudios, de modo que ahí los dos órdenes coinciden.
 
 ## Qué no garantiza

@@ -241,9 +241,9 @@ Respuesta a la revisión de 0.6. Plataforma de Miguel: Windows 10.
 |---|---|
 | Acentos, toda la cadena | Salida de las herramientas decodificada como UTF-8 (antes cp1252 en Windows: "polÃ­tica"); selector de carpetas en UTF-8 para rutas con acentos; app.js y app.css con charset; consola de Windows en UTF-8; todas las lecturas y escrituras de texto con encoding explícito |
 
-# Cambios 0.9.3 / Changes 0.9.3
+# Cambios 0.9.4 / Changes 0.9.4
 
-Las versiones 0.8.0 a 0.9.2 no se publicaron; sus cambios y los hallazgos de sus seis rondas de revisión están aquí.
+Las versiones 0.8.0 a 0.9.3 no se publicaron; sus cambios y los hallazgos de sus siete rondas de revisión están aquí.
 
 | # | Hallazgo o cambio / Finding or change | Qué se hizo / What was done | Prueba / Test |
 |---|---|---|---|
@@ -263,3 +263,8 @@ Las versiones 0.8.0 a 0.9.2 no se publicaron; sus cambios y los hallazgos de sus
 | 14 | Faltaban la edad y el sexo junto al identificador anónimo, y un nombre legible por paciente | Etiqueta por estudio `ANON-0001 · F · 54 años en el estudio`: seudónimo persistente, `PatientSex` tal como consta y edad en la fecha del estudio, calculada antes de anonimizar las fechas. En Estudios, en el visor de la corrida y en el manifiesto. `docs/demografia.md` | `pruebas/test_demografia.py` (33) |
 | 15 | La edad no debe exponer fechas ni depender de hoy; es del estudio, no del paciente | Solo se guarda la edad o el motivo; 90 años o más agrupados; menores de un año en meses, semanas o días; `PatientAge` como edad informada, distinguida | `test_ni_la_fecha_de_nacimiento_ni_la_del_estudio_aparecen_en_lo_nuevo`, `test_el_mismo_paciente_tiene_edades_distintas_en_dos_estudios`, `test_la_edad_no_depende_de_la_fecha_de_hoy` |
 | 16 | La demografía de un paquete no debe cambiar con importaciones posteriores ni tocar archivos ya revisados | Resumen sobre los archivos exactos, congelado con la corrida; los archivos limpios no cambian y los estudios ya importados se completan reimportando la carpeta original | `test_la_demografia_de_una_corrida_no_cambia_con_importaciones_posteriores`, `test_los_archivos_limpios_y_sus_pixeles_no_cambian`, `test_estudios_importados_con_una_version_anterior` |
+| 17 | El visor de la corrida no podía mostrar archivos con varios cuadros (error al dibujar) y la revisión se podía registrar igualmente | `render_bytes()` dibuja el cuadro pedido; segundo deslizador en el visor; si una imagen no se puede dibujar, la corrida lo anota y su revisión se rechaza; Estudios avisa y no admite "sin hallazgos" para pacientes con archivos de varios cuadros | `test_un_archivo_con_varios_cuadros_se_puede_recorrer_en_el_visor_de_la_corrida`, `test_una_imagen_que_el_visor_no_puede_dibujar_bloquea_la_revision`, `test_un_fallo_al_dibujar_durante_la_revision_tambien_la_bloquea`, `test_archivos_con_varios_cuadros_por_la_api` |
+| 18 | Dos originales que dan el mismo archivo limpio podían pisarse la edad: quedaba la del último | Se conservan todas las observaciones distintas de la invocación, también la de un original en cuarentena por contenido distinto; el estudio muestra el conflicto | `test_dos_copias_de_una_instancia_con_fechas_distintas_dan_conflicto_y_no_la_ultima_edad`, `test_dos_copias_con_sexos_distintos_no_se_resuelven_en_silencio` |
+| 19 | `--solo-lista` limitaba solo el lado limpio de la comparación de SUV; un original en cuarentena contaba como faltante | Con lista, la serie original son los originales de los archivos listados; sin lista, sin cambios | `test_un_pet_en_cuarentena_no_cuenta_como_faltante_en_el_suv_de_la_corrida` |
+| 20 | Una consulta de estado fallida dejaba el modo rápido colgado, con el botón deshabilitado | `seguirTrabajo()`: reintentos, mensaje, botón principal disponible y "Volver a consultar"; también en la limpieza de Entrada | Prueba de navegador: dos fallos seguidos y fallo sin parar |
+| 21 | La dirección de la aplicación se imprimía antes de que el servidor escuchara | Se imprime al terminar el índice de estudios | |

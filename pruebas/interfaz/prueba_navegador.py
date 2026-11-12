@@ -146,6 +146,17 @@ def main() -> int:
             pag.click("nav.pestanas button[data-tab=rapido]")
             expect(pag.locator("#rap-destino")).not_to_have_value("")
             pag.fill("#rap-origen", caso)
+            # consulta de estado: las dos primeras peticiones fallan; la interfaz debe reintentar y terminar igualmente
+            fallos = {"quedan": 2, "vistos": 0}
+
+            def cortar_algunas(ruta):
+                if fallos["quedan"] > 0:
+                    fallos["quedan"] -= 1
+                    fallos["vistos"] += 1
+                    return ruta.abort()
+                return ruta.continue_()
+
+            pag.route("**/api/trabajo/*", cortar_algunas)
             pag.click("#btn-rapido")
             expect(pag.locator("#rap-estado")).to_contain_text("revisión de píxeles pendiente", timeout=180000)
             expect(pag.locator("#rap-pasos .paso-fila")).to_have_count(6)
@@ -154,6 +165,8 @@ def main() -> int:
             expect(pag.locator("#rap-pasos .insignia.error")).to_have_count(0)
             expect(pag.locator("#rap-revision")).not_to_have_class(re.compile(r"\boculto\b"))
             ok(True, "modo rápido: seis pasos sin fallos; el zip nace pendiente y los controles de revisión quedan a la vista")
+            ok(fallos["vistos"] == 2, "modo rápido: dos consultas de estado fallidas no dejan la pantalla colgada")
+            pag.unroute("**/api/trabajo/*")
             # el visor de la corrida: exactamente los archivos del paquete, en el orden de sus nombres
             expect(pag.locator("#rap-visor")).not_to_have_class(re.compile(r"\boculto\b"), timeout=30000)
             expect(pag.locator("#rap-series button")).to_have_count(2)
@@ -176,6 +189,19 @@ def main() -> int:
             expect(pag.locator("#rap-revision")).to_have_class(re.compile(r"\boculto\b"))
             ok(True, "modo rápido: el sello de revisión deja el zip en el destino y oculta los controles")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-0-rapido.png"), full_page=True)
+
+            # consulta de estado que falla sin parar: mensaje claro, botón principal disponible y recuperación a petición
+            cortado = {"si": True}
+            pag.route("**/api/trabajo/*", lambda ruta: ruta.abort() if cortado["si"] else ruta.continue_())
+            pag.click("#btn-rapido")
+            expect(pag.locator("#rap-estado")).to_contain_text("No se pudo consultar el estado de la corrida", timeout=60000)
+            expect(pag.locator("#btn-rapido")).to_be_enabled()
+            cortado["si"] = False
+            pag.click("#rap-estado button.reintentar")
+            expect(pag.locator("#rap-estado")).to_contain_text("revisión de píxeles pendiente", timeout=180000)
+            expect(pag.locator("#rap-pasos .paso-fila")).to_have_count(6)
+            ok(True, "modo rápido: si la consulta de estado falla sin parar, se dice, el botón vuelve y 'Volver a consultar' recupera la corrida")
+            pag.unroute("**/api/trabajo/*")
             nav.close()
         print(f"capturas en {destino}")
         if fallos:

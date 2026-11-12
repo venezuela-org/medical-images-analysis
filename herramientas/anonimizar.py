@@ -73,7 +73,7 @@ from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, UID  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True  # elementos privados mal formados no detienen la corrida
 
-VERSION = "0.4.8"
+VERSION = "0.4.9"
 POLITICA = "pet-ct-local/0.4"
 RAIZ_UID = "1.2.826.0.1.3680043.8.498."     # raíz pydicom, libre de uso; identifica los UID reescritos
 DICOM_ROOT = "1.2.840.10008"
@@ -377,8 +377,23 @@ def observacion_de_archivo_limpio(ds) -> dict:
             "s": sexo_registrado(ds.get("PatientSex", ""))}
 
 
+def anotar_observacion(registro: dict[str, list[dict]], ruta_limpia: str, observacion: dict) -> None:
+    """Añade la observación de un original a las de su archivo limpio, sin repetir las idénticas ni descartar las distintas."""
+    lista = registro.setdefault(ruta_limpia, [])
+    if observacion not in lista:
+        lista.append(observacion)
+
+
+def observaciones_de_registro(valor) -> list[dict]:
+    """Las observaciones de un archivo tal como están en el registro: una lista, o un solo objeto en registros antiguos."""
+    if isinstance(valor, dict):
+        return [valor]
+    return [o for o in (valor or []) if isinstance(o, dict)]
+
+
 def resumen_demografia(observaciones: list[dict]) -> dict:
-    """Resumen de UN estudio a partir de las observaciones de sus archivos. Nunca elige en silencio entre valores distintos."""
+    """Resumen de UN estudio a partir de las observaciones de sus originales (una o más por archivo limpio). Nunca elige en
+    silencio entre valores distintos."""
     n = len(observaciones)
     # sexo
     sexos = sorted({o["s"] for o in observaciones if o["s"] in ("F", "M", "O")})
@@ -391,11 +406,11 @@ def resumen_demografia(observaciones: list[dict]) -> dict:
     elif len(sexos) == 1:
         sexo = {"estado": "registrado", "valor": sexos[0]}
         if sin_sexo:
-            avisos_sexo.append(f"{sin_sexo} de {n} archivo(s) no registran el sexo")
+            avisos_sexo.append(f"{sin_sexo} de {n} original(es) no registran el sexo")
     else:
         sexo = {"estado": "no_registrado", "valor": None}
     if raros:
-        avisos_sexo.append(f"{raros} de {n} archivo(s) traen en PatientSex un valor que no es F, M ni O")
+        avisos_sexo.append(f"{raros} de {n} original(es) traen en PatientSex un valor que no es F, M ni O")
     sexo["fuente"] = "PatientSex del DICOM; no se infiere"
     sexo["avisos"] = avisos_sexo
     # edad
@@ -409,7 +424,7 @@ def resumen_demografia(observaciones: list[dict]) -> dict:
         edad = {"estado": "calculada", "valor": valor, "unidad": unidad, "agrupada": agrupada, "texto": texto_edad(valor, unidad, agrupada),
                 "fuente": "calculada con la fecha de nacimiento y la fecha del estudio originales, antes de anonimizar las fechas", "motivo": None}
         if sin_calcular:
-            avisos_edad.append(f"en {sin_calcular} de {n} archivo(s) no se pudo calcular la edad: {'; '.join(motivos)}")
+            avisos_edad.append(f"en {sin_calcular} de {n} original(es) no se pudo calcular la edad: {'; '.join(motivos)}")
         distintas = [i for i in informadas if tuple(i) != (valor, unidad, agrupada)]
         if distintas:
             avisos_edad.append("la edad informada por el equipo (" + ", ".join(texto_edad(*i) for i in distintas) + ") no coincide con la calculada")
@@ -427,7 +442,7 @@ def resumen_demografia(observaciones: list[dict]) -> dict:
             motivo += "; además, PatientAge no es coherente entre los archivos del estudio"
         edad = {"estado": "no_disponible", "valor": None, "unidad": None, "agrupada": False, "texto": None, "fuente": None, "motivo": motivo}
     edad["avisos"] = avisos_edad
-    return {"sexo": sexo, "edad_en_el_estudio": edad, "archivos": n}
+    return {"sexo": sexo, "edad_en_el_estudio": edad}
 
 
 def etiqueta_demografia(paciente: str, resumen: dict) -> str:
@@ -1046,7 +1061,10 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     omitidos: Counter = Counter()
     escritos = duplicados = actualizados = ya_anonimizados = 0
     aceptados: list[str] = []          # salidas limpias de ESTA invocación: escritas, actualizadas o duplicados verificados
-    demografia_nueva: dict[str, dict] = {}   # ruta limpia → lo que su original dice de edad y sexo (sin fechas)
+    # ruta limpia → lo que sus originales dicen de edad y sexo (sin fechas). Es una LISTA: dos originales distintos pueden
+    # dar el mismo archivo limpio (la fecha de nacimiento se vacía al limpiar) y decir edades o sexos distintos; se guardan
+    # todas las observaciones distintas de esta invocación, sin quedarse con la del último archivo procesado.
+    demografia_nueva: dict[str, list[dict]] = {}
     pacientes_vistos: set[str] = set()
     posverif: Counter = Counter()
     problemas_restantes: list[str] = []
@@ -1122,7 +1140,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     os.unlink(tmp)
                     indice.anotar(ruta_salida, ruta, entrada)   # el duplicado verificado también queda indexado
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
-                    demografia_nueva[ruta_salida.relative_to(salida).as_posix()] = observacion
+                    anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 if solo_cambia_version(ruta_salida, nuevos_bytes):
                     os.replace(tmp, ruta_salida)                 # misma imagen limpia escrita por una versión anterior: se actualiza en el sitio
@@ -1130,16 +1148,19 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     actualizados += 1
                     indice.anotar(ruta_salida, ruta, entrada)
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
-                    demografia_nueva[ruta_salida.relative_to(salida).as_posix()] = observacion
+                    anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 os.unlink(tmp)
                 cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": "misma instancia SOP con contenido distinto / same SOP instance, different content"})
+                # El original no se copia, pero lo que dice de la edad y el sexo sí cuenta: es otro registro de la misma
+                # instancia, y si discrepa del ya guardado el estudio debe mostrar el conflicto.
+                anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                 continue
             os.replace(tmp, ruta_salida)
             os.chmod(ruta_salida, 0o600)
             indice.anotar(ruta_salida, ruta, entrada)
             aceptados.append(ruta_salida.relative_to(salida).as_posix())
-            demografia_nueva[ruta_salida.relative_to(salida).as_posix()] = observacion
+            anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
             posverif["limpios / clean"] += 1
             escritos += 1
             if escritos % 200 == 0:

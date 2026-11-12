@@ -209,3 +209,54 @@ def test_empaquetado_clasico_por_la_api_exporta_cortes_numerados(srv, tmp_path):
     nombres = sorted(nombres_zip(r["ruta"]))
     assert len(nombres) == 8 and all(n.rsplit("/", 1)[1].startswith("corte_00000") for n in nombres)
     assert {e["ruta"] for e in manifiesto(r["ruta"])["archivos"]} == set(nombres) == nombres_zip(t["zip"])
+
+
+ENHANCED_CT = "1.2.840.10008.5.1.4.1.1.2.1"
+
+
+def caso_con_dos_cuadros(tmp_path: Path) -> Path:
+    d = caso(tmp_path, "multicuadro")
+    ds = pydicom.dcmread(d / "SE0" / "IM0")
+    ds.SOPClassUID = ENHANCED_CT
+    ds.file_meta.MediaStorageSOPClassUID = ENHANCED_CT
+    ds.SOPInstanceUID = pydicom.uid.generate_uid()
+    ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+    ds.SeriesInstanceUID = pydicom.uid.generate_uid()
+    ds.SeriesNumber = 7
+    ds.NumberOfFrames = 2
+    ds.PixelData = ds.PixelData + bytes(255 - b for b in ds.PixelData)
+    (d / "SE2").mkdir()
+    ds.save_as(d / "SE2" / "MF0", enforce_file_format=True)
+    return d
+
+
+def test_archivos_con_varios_cuadros_por_la_api(srv, tmp_path):
+    t = srv.rapido(caso_con_dos_cuadros(tmp_path))
+    assert t["zip"] and t["no_mostrables"] == []
+    estado, series = srv.api(f"rapido/{t['id']}/series")
+    indice = next(s["indice"] for s in series if s["cuadros"] == [2])
+
+    def png(ruta: str) -> tuple[int, bytes]:
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.puerto}/api/{ruta}", headers={"X-Token": srv.token})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    e1, uno = png(f"rapido/{t['id']}/corte/{indice}/1?cuadro=1")
+    e2, dos = png(f"rapido/{t['id']}/corte/{indice}/1?cuadro=2")
+    e3, _ = png(f"rapido/{t['id']}/corte/{indice}/1?cuadro=3")
+    assert (e1, e2, e3) == (200, 200, 404) and uno[:4] == dos[:4] == b"\x89PNG" and uno != dos
+    # Estudios muestra un cuadro por archivo; dibuja el que se le pida, pero no permite recorrerlos
+    _, estudios = srv.api("estudios?refrescar=1")
+    multi = next(s for s in estudios if s["cuadros_max"] == 2)
+    e4, _ = png(f"serie/{multi['id']}/corte/0?cuadro=2")
+    assert e4 == 200
+    # por eso la revisión clásica "sin hallazgos" de ese paciente se rechaza, y se dice dónde hacerla
+    estado, r = srv.api("revision", {"paciente": t["pacientes"][0], "estado": "sin_hallazgos", "hallazgos": [], "revisor": "Prueba"})
+    assert estado == 409 and "varios cuadros" in r["detail"] and "modo rápido" in r["detail"]
+    estado, r = srv.api("revision", {"paciente": t["pacientes"][0], "estado": "con_hallazgos", "hallazgos": ["texto_grabado"], "revisor": "Prueba"})
+    assert estado == 200                                              # registrar hallazgos sí se puede
+    estado, r = srv.api("rapido/revision", {"trabajo": t["id"], "revisor": "Prueba"})
+    assert estado == 200 and r["revision_pixeles_pendiente"] == []    # y la corrida, que sí permite verlos todos, se revisa

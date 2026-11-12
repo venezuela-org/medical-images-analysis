@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -250,7 +250,7 @@ CRITERIO_NUMERO, CRITERIO_POSICION, CRITERIO_DESEMPATE = "InstanceNumber", "posi
 ETIQUETAS_ORDEN = ["InstanceNumber", "ImagePositionPatient", "ImageOrientationPatient", "TemporalPositionIdentifier",
                    "NumberOfTemporalPositions", "NumberOfTimeSlices", "Modality", "Rows", "Columns", "SeriesDescription",
                    "ProtocolName", "PixelSpacing", "SliceThickness", "PatientIdentityRemoved", "DeidentificationMethod",
-                   "PatientSex", "PatientAge"]
+                   "PatientSex", "PatientAge", "NumberOfFrames"]
 
 
 def _entero_valido(v) -> int | None:
@@ -272,7 +272,9 @@ def datos_de_orden(ds) -> dict:
     def mayor_que_uno(nombre: str) -> bool:
         n = _entero_valido(ds.get(nombre, None))
         return n is not None and n > 1
-    return {"numero": _entero_valido(ds.get("InstanceNumber", None)), "ipp": flotantes("ImagePositionPatient", 3),
+    cuadros = _entero_valido(ds.get("NumberOfFrames", None))
+    return {"cuadros": cuadros if cuadros and cuadros > 1 else 1,
+            "numero": _entero_valido(ds.get("InstanceNumber", None)), "ipp": flotantes("ImagePositionPatient", 3),
             "iop": flotantes("ImageOrientationPatient", 6), "fase": _entero_valido(ds.get("TemporalPositionIdentifier", None)),
             "varias_fases": mayor_que_uno("NumberOfTemporalPositions") or mayor_que_uno("NumberOfTimeSlices")}
 
@@ -306,21 +308,24 @@ def ordenar_serie(archivos: list[Path], cabeceras: dict | None = None) -> dict:
             try:
                 d = datos_de_orden(pydicom.dcmread(a, stop_before_pixels=True, specific_tags=ETIQUETAS_ORDEN))
             except Exception:
-                d = {"numero": None, "ipp": None, "iop": None, "fase": None, "varias_fases": False}
+                d = {"numero": None, "ipp": None, "iop": None, "fase": None, "varias_fases": False, "cuadros": 1}
         items.append({**d, "ruta": a})
     numeros = [i["numero"] for i in items]
     if items and all(n is not None for n in numeros) and len(set(numeros)) == len(numeros):
-        return {"orden": [i["ruta"] for i in sorted(items, key=lambda i: i["numero"])], "criterio": CRITERIO_NUMERO, "aviso": None}
+        return {"orden": [i["ruta"] for i in sorted(items, key=lambda i: i["numero"])], "criterio": CRITERIO_NUMERO, "aviso": None,
+                "cuadros": {i["ruta"].name: i.get("cuadros", 1) for i in items}}
     motivo = "InstanceNumber ausente en algún archivo" if any(n is None for n in numeros) else "InstanceNumber repetido"
     proy = _proyecciones(items)
     if proy is not None:
         pares = sorted(zip(proy, range(len(items))))
         return {"orden": [items[k]["ruta"] for _, k in pares], "criterio": CRITERIO_POSICION,
-                "aviso": f"{motivo}; cortes ordenados por posición a lo largo de la normal del plano"}
+                "aviso": f"{motivo}; cortes ordenados por posición a lo largo de la normal del plano",
+                "cuadros": {i["ruta"].name: i.get("cuadros", 1) for i in items}}
     def clave(i: dict):
         return (i["numero"] is None, i["numero"] or 0, i["fase"] is None, i["fase"] or 0, i["ruta"].name)
     return {"orden": [i["ruta"] for i in sorted(items, key=clave)], "criterio": CRITERIO_DESEMPATE,
-            "aviso": f"{motivo} y la posición no describe una pila única; el orden de los cortes es un desempate determinista, no un orden anatómico verificado"}
+            "aviso": f"{motivo} y la posición no describe una pila única; el orden de los cortes es un desempate determinista, no un orden anatómico verificado",
+            "cuadros": {i["ruta"].name: i.get("cuadros", 1) for i in items}}
 
 
 def mapa_exportacion(rels: list[str]) -> tuple[dict[str, str], dict[str, dict]]:
@@ -337,7 +342,8 @@ def mapa_exportacion(rels: list[str]) -> tuple[dict[str, str], dict[str, dict]]:
         ancho = max(6, len(str(len(o["orden"]))))
         for k, a in enumerate(o["orden"], 1):
             mapa[f"{serie}/{a.name}"] = f"{serie}/corte_{k:0{ancho}d}_{a.stem}.dcm"
-        info[serie] = {"criterio": o["criterio"], "aviso": o["aviso"], "archivos": len(o["orden"])}
+        info[serie] = {"criterio": o["criterio"], "aviso": o["aviso"], "archivos": len(o["orden"]),
+                       "cuadros": [o["cuadros"].get(a.name, 1) for a in o["orden"]]}
     return mapa, info
 
 
@@ -363,19 +369,26 @@ def demografia_de(rels: list[str], de_los_limpios: dict[str, dict] | None = None
     registro = registro_demografia() if registro is None else registro
     limpios = (TRABAJO / "limpios").resolve()
     por_estudio: dict[str, list[dict]] = {}
+    archivos_por_estudio: dict[str, int] = {}
     for rel in rels:
-        obs = registro.get(rel) or (de_los_limpios or {}).get(rel)
-        if obs is None:
-            try:
-                obs = ANON.observacion_de_archivo_limpio(pydicom.dcmread(limpios / rel, stop_before_pixels=True, specific_tags=["PatientSex", "PatientAge"]))
-            except Exception:
-                obs = {"e": ["n", "archivo ilegible"], "i": None, "s": ""}
-        por_estudio.setdefault("/".join(rel.split("/")[:2]), []).append(obs)
+        observaciones = ANON.observaciones_de_registro(registro.get(rel))        # todas las de sus originales, sin elegir
+        if not observaciones:
+            obs = (de_los_limpios or {}).get(rel)
+            if obs is None:
+                try:
+                    obs = ANON.observacion_de_archivo_limpio(pydicom.dcmread(limpios / rel, stop_before_pixels=True, specific_tags=["PatientSex", "PatientAge"]))
+                except Exception:
+                    obs = {"e": ["n", "archivo ilegible"], "i": None, "s": ""}
+            observaciones = [obs]
+        clave = "/".join(rel.split("/")[:2])
+        por_estudio.setdefault(clave, []).extend(observaciones)
+        archivos_por_estudio[clave] = archivos_por_estudio.get(clave, 0) + 1
     out = []
     for clave in sorted(por_estudio):
         paciente, estudio = clave.split("/")
         resumen = ANON.resumen_demografia(por_estudio[clave])
-        out.append({"paciente": paciente, "estudio": estudio, "etiqueta": ANON.etiqueta_demografia(paciente, resumen), **resumen})
+        out.append({"paciente": paciente, "estudio": estudio, "etiqueta": ANON.etiqueta_demografia(paciente, resumen), **resumen,
+                    "archivos": archivos_por_estudio[clave]})
     return out
 
 
@@ -417,6 +430,7 @@ def indexar() -> None:
         o = ordenar_serie(legibles, cabeceras)                       # el mismo orden que usará la exportación
         cortes = [(k, str(a)) for k, a in enumerate(o["orden"], 1)]
         meta["orden_criterio"], meta["orden_aviso"] = o["criterio"], o["aviso"]
+        meta["cuadros_max"] = max(o["cuadros"].values(), default=1)
         rel = carpeta_serie.relative_to(limpios)
         sid = hashlib.sha1(str(rel).encode()).hexdigest()[:12]
         INDICE[sid] = {"id": sid, "paciente": rel.parts[0], "estudio": rel.parts[1], "serie": rel.parts[2],
@@ -435,11 +449,52 @@ def render_corte(ruta: str, ventana: str) -> bytes:
     return render_bytes(Path(ruta).read_bytes(), ventana)
 
 
-def render_bytes(datos: bytes, ventana: str) -> bytes:
-    """PNG de un corte a partir de los bytes exactos de su archivo DICOM. No abre ninguna ruta."""
+class ImagenNoMostrable(Exception):
+    """Los bytes son un DICOM aceptado, pero el visor no puede dibujar esa imagen. El motivo no lleva datos del paciente."""
+
+
+def _reescala(ds, cuadro: int) -> tuple[float, float]:
+    """Pendiente y ordenada de la escala: del nivel superior o, en objetos Enhanced, de los grupos funcionales."""
+    def de(item):
+        try:
+            t = item.PixelValueTransformationSequence[0]
+            return float(t.get("RescaleSlope", 1) or 1), float(t.get("RescaleIntercept", 0) or 0)
+        except Exception:
+            return None
+    if "RescaleSlope" in ds or "RescaleIntercept" in ds:
+        return float(ds.get("RescaleSlope", 1) or 1), float(ds.get("RescaleIntercept", 0) or 0)
+    for nombre, indice in (("PerFrameFunctionalGroupsSequence", cuadro - 1), ("SharedFunctionalGroupsSequence", 0)):
+        try:
+            r = de(ds[nombre][indice])
+        except Exception:
+            r = None
+        if r:
+            return r
+    return 1.0, 0.0
+
+
+def render_bytes(datos: bytes, ventana: str, cuadro: int = 1) -> bytes:
+    """PNG de un corte a partir de los bytes exactos de su archivo DICOM. No abre ninguna ruta. En un archivo con varios
+    cuadros dibuja el cuadro pedido (desde 1). Lanza ImagenNoMostrable si no puede dibujarlo."""
     ds = pydicom.dcmread(io.BytesIO(datos))
-    arr = ds.pixel_array.astype(np.float32)
-    arr = arr * float(ds.get("RescaleSlope", 1) or 1) + float(ds.get("RescaleIntercept", 0) or 0)
+    try:
+        arr = ds.pixel_array
+    except Exception as e:
+        raise ImagenNoMostrable(f"no se pudieron decodificar los píxeles ({type(e).__name__})")
+    if int(ds.get("SamplesPerPixel", 1) or 1) != 1:
+        raise ImagenNoMostrable("imagen con varias muestras por píxel (color)")
+    if arr.ndim == 3:
+        if not 1 <= cuadro <= arr.shape[0]:
+            raise ImagenNoMostrable("cuadro fuera de rango")
+        arr = arr[cuadro - 1]
+    elif arr.ndim == 2:
+        if cuadro != 1:
+            raise ImagenNoMostrable("cuadro fuera de rango")
+    else:
+        raise ImagenNoMostrable(f"matriz de píxeles de {arr.ndim} dimensiones")
+    arr = arr.astype(np.float32)
+    pendiente, ordenada = _reescala(ds, cuadro)
+    arr = arr * pendiente + ordenada
     if ventana == "auto" or str(ds.get("Modality", "")) == "PT":
         lo, hi = np.percentile(arr, 0.5), np.percentile(arr, 99.5)
     else:
@@ -451,7 +506,10 @@ def render_bytes(datos: bytes, ventana: str) -> bytes:
     if str(ds.get("PhotometricInterpretation", "")) == "MONOCHROME1":
         img = 255 - img
     buf = io.BytesIO()
-    Image.fromarray(img.astype(np.uint8)).save(buf, format="PNG")
+    try:
+        Image.fromarray(img.astype(np.uint8)).save(buf, format="PNG")
+    except Exception as e:
+        raise ImagenNoMostrable(f"no se pudo dibujar la imagen ({type(e).__name__})")
     return buf.getvalue()
 
 
@@ -550,14 +608,16 @@ def estudios(request: Request, refrescar: int = 0):
 
 
 @api.get("/serie/{sid}/corte/{i}")
-def corte(request: Request, sid: str, i: int, ventana: str = "tejido"):
+def corte(request: Request, sid: str, i: int, ventana: str = "tejido", cuadro: int = 1):
     auth(request)
     s = INDICE.get(sid)
     if not s:
         raise HTTPException(404, "serie desconocida")
     i = max(0, min(i, s["n"] - 1))
     try:
-        png = render_corte(s["cortes"][i][1], ventana)
+        png = render_bytes(Path(s["cortes"][i][1]).read_bytes(), ventana, cuadro)
+    except ImagenNoMostrable as e:
+        raise HTTPException(422, f"este corte no se puede mostrar: {e}")
     except Exception as e:
         raise HTTPException(500, f"no se pudo renderizar el corte: {type(e).__name__}")
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
@@ -1049,6 +1109,8 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
             paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000])
             return terminar("error", "El paquete no se creó." + texto_restos(e.cuerpo.get("restos", [])))
         t["zip"], t["archivos"] = r["ruta"], r["hashes"]
+        t["no_mostrables"] = []
+        comprobar_que_se_puede_mostrar(t)
         t["revision_pixeles_pendiente"] = r["revision_pixeles_pendiente"]
         t["destino_sincronizado"] = en_sincronizada(destino)
         extra = "".join(f" {pac} tiene además {n} archivo(s) de importaciones anteriores que no entran en este zip." for pac, n in t["otros_archivos_del_paciente"].items())
@@ -1056,8 +1118,12 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         por_posicion = sorted(serie for serie, o in orden_series.items() if o["criterio"] == CRITERIO_POSICION)
         nota_orden = (f" Orden de cortes NO verificado en {len(sin_verificar)} serie(s): {', '.join(x.split('/')[-1] for x in sin_verificar)}." if sin_verificar else "") + \
                      (f" {len(por_posicion)} serie(s) ordenadas por posición, sin InstanceNumber utilizable." if por_posicion else "")
-        paso("paquete", "aviso" if sin_verificar else "ok",
-             f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}",
+        varios_cuadros = sum(1 for s_ in t["series_corrida"] for n_ in s_["cuadros"] if n_ > 1)
+        nota_cuadros = f" {varios_cuadros} archivo(s) tienen varios cuadros; el visor de la corrida permite recorrerlos." if varios_cuadros else ""
+        nota_visor = (f" {len(t['no_mostrables'])} imagen(es) no se pueden mostrar en el visor ({t['no_mostrables'][0]['motivo']}): "
+                      "la revisión de píxeles de esta corrida no se puede registrar aquí.") if t.get("no_mostrables") else ""
+        paso("paquete", "aviso" if sin_verificar or t.get("no_mostrables") else "ok",
+             f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}{nota_cuadros}{nota_visor}",
              r["ruta"] + "\n" + "\n".join(f"{serie}: {o['criterio']}" + (f" ({o['aviso']})" if o["aviso"] else "") for serie, o in sorted(orden_series.items())))
         hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
         terminar("con avisos" if hay_avisos else "ok",
@@ -1085,7 +1151,8 @@ def series_congeladas(exportacion: dict[str, str], orden_series: dict[str, dict]
         o = orden_series.get(serie) or {}
         out.append({"serie": serie, "modalidad": partes[2] if len(partes) >= 4 else "", "n": len(pares),
                     "criterio": o.get("criterio"), "aviso": o.get("aviso"),
-                    "archivos": [interno for _, interno in pares], "nombres": [exportado.rsplit("/", 1)[1] for exportado, _ in pares]})
+                    "archivos": [interno for _, interno in pares], "nombres": [exportado.rsplit("/", 1)[1] for exportado, _ in pares],
+                    "cuadros": list(o.get("cuadros") or [1] * len(pares))})
     return out
 
 
@@ -1096,12 +1163,21 @@ def corrida_con_zip(tid: str) -> dict:
     return t
 
 
-def png_de_corrida(t: dict, indice: int, k: int, ventana: str) -> bytes:
-    """El corte k (desde 1) de la serie `indice` de la corrida, en el orden congelado del paquete. Solo se muestra si el
-    archivo sigue siendo, byte a byte, el que entró en el paquete."""
+def anotar_no_mostrable(t: dict, indice: int, k: int, cuadro: int, motivo: str) -> None:
+    s_ = t["series_corrida"][indice]
+    entrada = {"serie": s_["serie"], "archivo": s_["nombres"][k - 1], "cuadro": cuadro, "motivo": motivo}
+    if entrada not in t.setdefault("no_mostrables", []):
+        t["no_mostrables"].append(entrada)
+
+
+def png_de_corrida(t: dict, indice: int, k: int, ventana: str, cuadro: int = 1) -> bytes:
+    """El corte k (desde 1) de la serie `indice` de la corrida, en el orden congelado del paquete; en archivos con varios
+    cuadros, el cuadro pedido. Solo se muestra si el archivo sigue siendo, byte a byte, el que entró en el paquete."""
     series = t.get("series_corrida") or []
     if not 0 <= indice < len(series) or not 1 <= k <= series[indice]["n"]:
         raise HTTPException(404, "corte fuera de rango")
+    if not 1 <= cuadro <= series[indice]["cuadros"][k - 1]:
+        raise HTTPException(404, "cuadro fuera de rango")
     rel = series[indice]["archivos"][k - 1]
     ruta = (TRABAJO / "limpios").resolve() / rel
     # Una sola lectura: el hash se calcula sobre estos bytes y la imagen se dibuja desde estos mismos bytes. La ruta no
@@ -1112,7 +1188,27 @@ def png_de_corrida(t: dict, indice: int, k: int, ventana: str) -> bytes:
         raise HTTPException(409, "este archivo cambió desde la corrida o ya no está; vuelve a ejecutar el modo rápido")
     if hashlib.sha256(datos).hexdigest() != t["archivos"].get(rel):
         raise HTTPException(409, "este archivo cambió desde la corrida; vuelve a ejecutar el modo rápido")
-    return render_bytes(datos, ventana if ventana in VENTANAS or ventana == "auto" else "tejido")
+    try:
+        return render_bytes(datos, ventana if ventana in VENTANAS or ventana == "auto" else "tejido", cuadro)
+    except ImagenNoMostrable as e:
+        # Lo que no se puede ver no se puede dar por revisado: queda anotado en la corrida y bloquea su revisión.
+        anotar_no_mostrable(t, indice, k, cuadro, str(e))
+        raise HTTPException(422, f"este corte no se puede mostrar: {e}. La revisión de píxeles de esta corrida no se puede registrar desde aquí")
+
+
+def comprobar_que_se_puede_mostrar(t: dict) -> None:
+    """Antes de ofrecer la revisión: intenta dibujar el primer archivo de cada serie y el primer y el último cuadro de
+    cada archivo con varios cuadros. No sustituye a mirar; detecta imágenes que el visor no sabe dibujar."""
+    for indice, s_ in enumerate(t.get("series_corrida") or []):
+        candidatos = {(1, 1)} | {(k, c) for k, n in enumerate(s_["cuadros"], 1) if n > 1 for c in (1, n)}
+        for k, cuadro in sorted(candidatos):
+            try:
+                png_de_corrida(t, indice, k, "auto", cuadro)
+            except HTTPException as e:
+                if e.status_code != 422:
+                    anotar_no_mostrable(t, indice, k, cuadro, str(e.detail))
+            except Exception as e:
+                anotar_no_mostrable(t, indice, k, cuadro, f"error al dibujar ({type(e).__name__})")
 
 
 @api.get("/rapido/{tid}/series")
@@ -1126,9 +1222,9 @@ def rapido_series(request: Request, tid: str):
 
 
 @api.get("/rapido/{tid}/corte/{indice}/{k}")
-def rapido_corte(request: Request, tid: str, indice: int, k: int, ventana: str = "tejido"):
+def rapido_corte(request: Request, tid: str, indice: int, k: int, ventana: str = "tejido", cuadro: int = 1):
     auth(request)
-    return Response(png_de_corrida(corrida_con_zip(tid), indice, k, ventana), media_type="image/png", headers={"Cache-Control": "no-store"})
+    return Response(png_de_corrida(corrida_con_zip(tid), indice, k, ventana, cuadro), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @api.post("/rapido")
@@ -1145,7 +1241,7 @@ def rapido(request: Request, cuerpo: dict):
     tid = secrets.token_hex(4)
     TRABAJOS[tid] = {"nombre": "rapido", "estado": "corriendo", "lineas": [], "codigo": None, "pasos": [], "pacientes": [],
                      "origen": str(origen), "destino": str(destino), "zip": None, "mensaje": "", "archivos": {}, "revisado": False,
-                     "exportacion": {}, "orden_de_cortes": {}, "series_corrida": [], "demografia": []}
+                     "exportacion": {}, "orden_de_cortes": {}, "series_corrida": [], "demografia": [], "no_mostrables": []}
     threading.Thread(target=_rapido, args=(tid, origen, destino, prefijo), daemon=True).start()
     registrar("rápido: iniciado")
     return {"trabajo": tid, "destino": str(destino)}
@@ -1159,6 +1255,10 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         raise HTTPException(400, "no hay un zip del modo rápido al que aplicar la revisión")
     if t.get("revisado"):
         raise HTTPException(409, "la revisión de esta corrida ya está registrada")
+    if t.get("no_mostrables"):
+        primero = t["no_mostrables"][0]
+        raise HTTPException(409, f"esta corrida tiene {len(t['no_mostrables'])} imagen(es) que el visor no puede mostrar "
+                                 f"({primero['archivo']}: {primero['motivo']}); no se puede registrar una revisión de píxeles sin verlas")
     error = validar_registro_revision("sin_hallazgos", [], revisor)
     if error:
         raise HTTPException(400, error)
@@ -1548,6 +1648,12 @@ def registrar_revision(request: Request, cuerpo: dict):
     error = validar_registro_revision(estado, hallazgos, revisor)
     if error:
         raise HTTPException(400, error)
+    if estado == "sin_hallazgos":
+        if not INDICE:
+            indexar()
+        if any(s_["paciente"] == pac and s_.get("cuadros_max", 1) > 1 for s_ in INDICE.values()):
+            raise HTTPException(409, "este paciente tiene archivos con varios cuadros y la pestaña Estudios muestra uno por archivo; "
+                                     "para registrar 'sin hallazgos' recorre todos los cuadros en el visor de una corrida del modo rápido")
     return guardar_revision(pac, estado, hallazgos, revisor, str(cuerpo.get("notas", ""))[:2000])
 
 
@@ -1591,6 +1697,7 @@ HTML = """<!doctype html>
     <p id="rap-etiqueta-estudio" class="etiqueta-estudio"></p><div id="rap-aviso-demografia"></div>
     <div class="visor-corrida"><div class="lienzo"><img id="rap-corte" alt="corte de la corrida"></div>
       <div><input type="range" id="rap-deslizador" min="1" max="1" value="1">
+        <div id="rap-cuadros" class="oculto"><label class="terciario" for="rap-cuadro">Cuadros de este archivo</label><input type="range" id="rap-cuadro" min="1" max="1" value="1"></div>
         <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label></div>
         <p id="rap-etiqueta" class="mono"></p>
         <div id="rap-orden"></div></div></div>
@@ -1694,7 +1801,32 @@ async function estado() {
     if (!e.anonimizar_presente) mensaje('#estado-anon', 'error', 'Falta anonimizar.py junto a app.py');
   } catch (err) { mensaje('#estado-anon', 'error', 'Abre la dirección completa que imprimió la terminal, con el token.'); }
 }
-let RAPIDO = null;
+// Consulta del estado de un trabajo que no se queda colgada: un fallo se reintenta; si persiste, se dice, se ofrece
+// volver a consultar y el botón principal vuelve a estar disponible. El trabajo puede seguir en marcha en el servidor.
+function seguirTrabajo(trabajo, opciones) {
+  let fallos = 0;
+  const reanudar = () => { fallos = 0; paso(); };
+  const paso = async () => {
+    if (opciones.vigente && !opciones.vigente()) return;
+    let t;
+    try { t = await api('trabajo/' + trabajo); fallos = 0; }
+    catch (err) {
+      fallos += 1;
+      if (fallos <= 5) { opciones.reintentando(fallos); setTimeout(paso, 1500); return; }
+      opciones.sinRespuesta(err, reanudar); return;
+    }
+    try {
+      if (t.estado === 'corriendo') { opciones.cada(t); setTimeout(paso, 800); }
+      else opciones.fin(t);
+    } catch (err) { opciones.sinRespuesta(err, reanudar); }
+  };
+  paso();
+}
+function botonReintentar(sel, rotulo, alPulsar) {
+  const cont = $(sel).querySelector('.mensaje') || $(sel); const b = document.createElement('button'); b.textContent = rotulo; b.className = 'reintentar';
+  b.onclick = () => { b.disabled = true; alPulsar(); }; cont.appendChild(document.createTextNode(' ')); cont.appendChild(b);
+}
+let RAPIDO = null, BLOQUEO_REVISION = false;
 const ETIQUETA_PASO = {pendiente: ['neutro', '· pendiente'], corriendo: ['info', '… en curso'], ok: ['ok', '✓ correcto'], aviso: ['aviso', '! aviso'], error: ['error', '× falló'], omitido: ['neutro', '– omitido']};
 function pintarPasos(t) {
   const cont = $('#rap-pasos'); cont.textContent = '';
@@ -1711,9 +1843,14 @@ function pintarPasos(t) {
 function pintarResultadoRapido(t) {
   if (t.estado === 'error') { mensaje('#rap-estado', 'error', t.mensaje || 'No se creó ningún zip.'); $('#rap-revision').classList.add('oculto'); return; }
   const nube = t.destino_sincronizado ? ' Ese destino está sincronizado con la nube (' + t.destino_sincronizado + '): el zip solo llegará allí ya revisado.' : '';
-  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube);
+  const ciegos = t.no_mostrables || [];
+  const notaCiegos = ciegos.length ? ' ' + ciegos.length + ' imagen(es) no se pueden mostrar en el visor (' + ciegos[0].archivo + ': ' + ciegos[0].motivo + '): la revisión de píxeles de esta corrida no se puede registrar aquí.' : '';
+  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube + notaCiegos);
   else mensaje('#rap-estado', t.estado === 'con avisos' ? 'aviso' : 'ok', (t.mensaje || '') + ' Zip: ' + t.zip);
   $('#rap-revision').classList.toggle('oculto', !(t.zip && !t.revisado));
+  BLOQUEO_REVISION = ciegos.length > 0;
+  $('#btn-rap-revision').disabled = BLOQUEO_REVISION;
+  $('#btn-rap-revision').title = BLOQUEO_REVISION ? 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas' : '';
 }
 $('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
@@ -1726,14 +1863,20 @@ $('#btn-rapido').onclick = async () => {
   try {
     const r = await api('rapido', {origen, destino: $('#rap-destino').value.trim()});
     RAPIDO = r.trabajo;
-    const esperar = async () => {
-      const t = await api('trabajo/' + r.trabajo); pintarPasos(t);
-      if (t.estado === 'corriendo') { mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj()); return setTimeout(esperar, 800); }
-      texto('#rap-reloj', 'terminó en ' + reloj()); pintarResultadoRapido(t); $('#btn-rapido').disabled = false;
-      if (t.zip) cargarVisorCorrida(r.trabajo);
-      ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = [];
-    };
-    esperar();
+    seguirTrabajo(r.trabajo, {
+      vigente: () => RAPIDO === r.trabajo,
+      cada: t => { pintarPasos(t); mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj()); },
+      reintentando: n => mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj() + ' · sin respuesta de la aplicación, reintentando (' + n + ' de 5)'),
+      sinRespuesta: (err, reanudar) => {
+        mensaje('#rap-estado', 'error', 'No se pudo consultar el estado de la corrida (' + err.message + '). La corrida puede seguir en marcha en la aplicación.');
+        botonReintentar('#rap-estado', 'Volver a consultar', reanudar); $('#btn-rapido').disabled = false;
+      },
+      fin: t => {
+        pintarPasos(t); texto('#rap-reloj', 'terminó en ' + reloj()); pintarResultadoRapido(t); $('#btn-rapido').disabled = false;
+        if (t.zip) cargarVisorCorrida(r.trabajo);
+        ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = [];
+      },
+    });
   } catch (err) { mensaje('#rap-estado', 'error', err.message); $('#btn-rapido').disabled = false; }
 };
 $('#btn-rap-revision').onclick = async () => {
@@ -1751,14 +1894,18 @@ $('#btn-rap-revision').onclick = async () => {
       (r.destino_sincronizado ? ' El destino está sincronizado con la nube (' + r.destino_sincronizado + ').' : ''));
     $('#rap-revision').classList.toggle('oculto', pend.length === 0);
   } catch (err) { if (trabajo === RAPIDO) mensaje('#rap-estado', 'error', err.message); }
-  finally { $('#btn-rap-revision').disabled = false; }
+  finally { $('#btn-rap-revision').disabled = BLOQUEO_REVISION; }
 };
 let CORRIDA = {trabajo: null, series: [], indice: 0};
-function pintarCorteCorrida() {
+function pintarCorteCorrida(conservarCuadro) {
   const s = CORRIDA.series[CORRIDA.indice]; if (!s) return;
   const k = Math.min(Math.max(parseInt($('#rap-deslizador').value, 10) || 1, 1), s.n);
-  $('#rap-corte').src = '/api/rapido/' + encodeURIComponent(CORRIDA.trabajo) + '/corte/' + CORRIDA.indice + '/' + k + '?ventana=' + encodeURIComponent($('#rap-ventana').value) + '&t=' + encodeURIComponent(T);
-  texto('#rap-etiqueta', 'corte ' + k + ' de ' + s.n + ' · ' + s.nombres[k - 1]);
+  const cuadros = (s.cuadros || [])[k - 1] || 1, dc = $('#rap-cuadro');
+  $('#rap-cuadros').classList.toggle('oculto', cuadros <= 1);
+  if (!conservarCuadro || parseInt(dc.max, 10) !== cuadros) { dc.min = 1; dc.max = cuadros; dc.value = 1; }
+  const c = Math.min(Math.max(parseInt(dc.value, 10) || 1, 1), cuadros);
+  $('#rap-corte').src = '/api/rapido/' + encodeURIComponent(CORRIDA.trabajo) + '/corte/' + CORRIDA.indice + '/' + k + '?ventana=' + encodeURIComponent($('#rap-ventana').value) + '&cuadro=' + c + '&t=' + encodeURIComponent(T);
+  texto('#rap-etiqueta', 'corte ' + k + ' de ' + s.n + ' · ' + s.nombres[k - 1] + (cuadros > 1 ? ' · cuadro ' + c + ' de ' + cuadros : ''));
 }
 function elegirSerieCorrida(i) {
   CORRIDA.indice = i; const s = CORRIDA.series[i];
@@ -1767,7 +1914,7 @@ function elegirSerieCorrida(i) {
   $('#rap-ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
   pintarDemografia('#rap-etiqueta-estudio', '#rap-aviso-demografia', s.demografia);
   mensaje('#rap-orden', s.criterio === 'desempate determinista' ? 'aviso' : 'neutro', 'Cortes ordenados por ' + (s.criterio || 'InstanceNumber') + (s.aviso ? ': ' + s.aviso : '') + '.');
-  pintarCorteCorrida();
+  pintarCorteCorrida(false);
 }
 async function cargarVisorCorrida(trabajo) {
   try {
@@ -1780,9 +1927,13 @@ async function cargarVisorCorrida(trabajo) {
     if (series.length) elegirSerieCorrida(0);
   } catch (err) { $('#rap-visor').classList.add('oculto'); }
 }
-$('#rap-deslizador').oninput = pintarCorteCorrida;
-$('#rap-ventana').onchange = pintarCorteCorrida;
-$('#rap-corte').onerror = () => texto('#rap-etiqueta', 'Este archivo cambió desde la corrida o no se puede mostrar; vuelve a ejecutar el modo rápido.');
+$('#rap-deslizador').oninput = () => pintarCorteCorrida(false);
+$('#rap-cuadro').oninput = () => pintarCorteCorrida(true);
+$('#rap-ventana').onchange = () => pintarCorteCorrida(true);
+$('#rap-corte').onerror = async () => {
+  texto('#rap-etiqueta', 'Este corte no se puede mostrar: el archivo cambió desde la corrida o el visor no sabe dibujar esta imagen.');
+  try { const t = await api('trabajo/' + CORRIDA.trabajo); if (CORRIDA.trabajo === RAPIDO) pintarResultadoRapido(t); } catch (err) { /* el estado se vuelve a pedir al registrar */ }
+};
 $('#btn-origen').onclick = async () => {
   const r = await api('elegir-carpeta', {});
   if (r.ruta) { $('#origen').value = r.ruta; mensaje('#aviso-origen', r.sincronizada ? 'aviso' : 'neutro', r.sincronizada ? 'Está dentro de una carpeta sincronizada (' + r.sincronizada + '). Se puede leer, pero conviene sacarla de la nube.' : 'Carpeta elegida.'); }
@@ -1801,17 +1952,27 @@ $('#btn-anonimizar').onclick = async () => {
   mensaje('#estado-anon', 'neutro', 'limpieza en curso · 00:00');
   try {
     const {trabajo} = await api('anonimizar', {origen, prefijo: $('#prefijo').value.trim(), conservar_descripciones: $('#conservar').checked});
-    const esperar = async () => {
-      const t = await api('trabajo/' + trabajo); texto('#salida-anon', t.lineas.join('\n'));
-      if (t.estado === 'corriendo') { const prog = [...t.lineas].reverse().find(l => /archivos limpios/.test(l)); mensaje('#estado-anon', 'neutro', 'limpieza en curso · ' + reloj() + (prog ? ' · ' + prog.trim().split(' (')[0] : '')); return setTimeout(esperar, 800); }
-      const listo = t.lineas.find(l => l.startsWith('Listo')) || '';
-      if (t.estado === 'ok') mensaje('#estado-anon', 'ok', 'Limpieza terminada en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. La verificación posterior pasó en las etiquetas revisadas; los píxeles no se revisan.');
-      else if (t.estado === 'con avisos') mensaje('#estado-anon', 'aviso', 'Terminó con cuarentena o avisos en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. Revisa el reporte antes de enviar.');
-      else mensaje('#estado-anon', 'error', 'Terminó con error. Revisa la salida.');
-      if (t.reporte) { $('#det-reporte').classList.remove('oculto'); texto('#reporte-anon', t.reporte); }
-      $('#btn-anonimizar').disabled = false; ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = []; cargarEstudios(1);
-    };
-    esperar();
+    seguirTrabajo(trabajo, {
+      cada: t => {
+        texto('#salida-anon', t.lineas.join('\n'));
+        const prog = [...t.lineas].reverse().find(l => /archivos limpios/.test(l));
+        mensaje('#estado-anon', 'neutro', 'limpieza en curso · ' + reloj() + (prog ? ' · ' + prog.trim().split(' (')[0] : ''));
+      },
+      reintentando: n => mensaje('#estado-anon', 'neutro', 'limpieza en curso · ' + reloj() + ' · sin respuesta de la aplicación, reintentando (' + n + ' de 5)'),
+      sinRespuesta: (err, reanudar) => {
+        mensaje('#estado-anon', 'error', 'No se pudo consultar el estado de la limpieza (' + err.message + '). Puede seguir en marcha en la aplicación.');
+        botonReintentar('#estado-anon', 'Volver a consultar', reanudar); $('#btn-anonimizar').disabled = false;
+      },
+      fin: t => {
+        texto('#salida-anon', t.lineas.join('\n'));
+        const listo = t.lineas.find(l => l.startsWith('Listo')) || '';
+        if (t.estado === 'ok') mensaje('#estado-anon', 'ok', 'Limpieza terminada en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. La verificación posterior pasó en las etiquetas revisadas; los píxeles no se revisan.');
+        else if (t.estado === 'con avisos') mensaje('#estado-anon', 'aviso', 'Terminó con cuarentena o avisos en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. Revisa el reporte antes de enviar.');
+        else mensaje('#estado-anon', 'error', 'Terminó con error. Revisa la salida.');
+        if (t.reporte) { $('#det-reporte').classList.remove('oculto'); texto('#reporte-anon', t.reporte); }
+        $('#btn-anonimizar').disabled = false; ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = []; cargarEstudios(1);
+      },
+    });
   } catch (err) { mensaje('#estado-anon', 'error', err.message); $('#btn-anonimizar').disabled = false; }
 };
 let SERIES = [], ACTUAL = null, ADSEQ = 0;
@@ -1849,7 +2010,8 @@ $('#btn-refrescar').onclick = () => cargarEstudios(1);
 function abrir(s) {
   pintarDemografia('#etiqueta-estudio', '#aviso-demografia', s.demografia);
   texto('#nota-orden', 'Cortes ordenados por ' + (s.orden_criterio || 'InstanceNumber') + '.');
-  mensaje('#aviso-orden', s.orden_criterio === 'desempate determinista' ? 'aviso' : 'neutro', s.orden_aviso ? 'Orden de los cortes: ' + s.orden_aviso + '.' : '');
+  mensaje('#aviso-orden', (s.orden_criterio === 'desempate determinista' || s.cuadros_max > 1) ? 'aviso' : 'neutro',
+    (s.orden_aviso ? 'Orden de los cortes: ' + s.orden_aviso + '. ' : '') + (s.cuadros_max > 1 ? 'Esta serie tiene archivos con varios cuadros (hasta ' + s.cuadros_max + '); aquí se muestra el primero de cada archivo. Para recorrerlos todos y registrar la revisión, usa el visor de una corrida en Rápido.' : ''));
   ACTUAL = s; $('#visor').classList.remove('oculto');
   document.querySelectorAll('#tabla-series tr.fila-serie').forEach(tr => tr.classList.toggle('seleccionada', tr.dataset.id === s.id));
   limpiarFormularioRevision(); cargarRevision(s.paciente); const d = $('#deslizador'); d.max = s.n - 1; d.value = Math.floor(s.n / 2);

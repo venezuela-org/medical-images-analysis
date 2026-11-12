@@ -119,6 +119,9 @@ pre.salida { background: var(--panel-2); border: 1px solid var(--borde); border-
 .pasos .insignia { justify-self: start; }
 .etiqueta-estudio { font-size: var(--t-l); font-weight: 600; margin: 0 0 var(--e-2) 0; }
 .etiqueta-estudio:empty { display: none; }
+button.reintentar { padding: var(--e-1) var(--e-3); font-size: var(--t-s); margin-left: var(--e-2); }
+#rap-cuadros { margin-top: var(--e-2); }
+#rap-cuadros label { display: block; }
 .visor-corrida { display: grid; grid-template-columns: minmax(280px, 460px) minmax(240px, 1fr); gap: var(--e-5); margin-top: var(--e-3); align-items: start; }
 .pasos .paso-resumen { color: var(--tinta-2); overflow-wrap: anywhere; }
 

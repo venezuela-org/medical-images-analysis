@@ -375,3 +375,55 @@ def test_el_manifiesto_solo_lleva_los_estudios_del_paquete(app, tmp_path):
     assert {d["estudio"] for d in estudios} == {unico(ta)["estudio"], unico(tb)["estudio"]}
     with pytest.raises(app.PaqueteRechazado):                                  # una demografía que no es la del paquete se rechaza
         app.crear_paquete(["ANON-0001"], demografia=ta["demografia"])
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# revisión del 11 de noviembre de 2026, séptima ronda: dos originales que dan el mismo archivo limpio
+# ---------------------------------------------------------------------------------------------------------------
+
+def test_dos_copias_de_una_instancia_con_fechas_distintas_dan_conflicto_y_no_la_ultima_edad(app, tmp_path):
+    """La fecha de nacimiento se vacía al limpiar, así que dos copias de una misma instancia con nacimientos distintos
+    dan el mismo archivo limpio. Sus edades (53 y 63) no coinciden: el estudio no puede mostrar ninguna de las dos."""
+    c = caso(tmp_path, "A")
+    for f in sorted(c.rglob("IM*")):
+        ds = pydicom.dcmread(f)
+        ds.PatientBirthDate = "19600310"                              # la copia dice diez años más
+        ds.save_as(f.with_name(f.name + "_copia"), enforce_file_format=True)
+    t = correr(app, c, tmp_path)
+    assert t["zip"], t["mensaje"]
+    assert "8 duplicados" in t["pasos"][0]["resumen"] and len(t["archivos"]) == 8       # el mismo archivo limpio para las dos copias
+    d = unico(t)
+    assert d["edad_en_el_estudio"]["estado"] == "no_disponible" and "edades distintas" in d["edad_en_el_estudio"]["motivo"]
+    assert d["etiqueta"] == "ANON-0001 · F · edad no disponible" and d["archivos"] == 8
+    registro = json.loads((app.TRABAJO / "limpios_PRIVADO" / "demografia.json").read_text(encoding="utf-8"))["archivos"]
+    assert all(sorted(o["e"][1] for o in obs) == [53, 63] for obs in registro.values())  # las dos observaciones se conservan
+
+
+def test_dos_copias_con_sexos_distintos_no_se_resuelven_en_silencio(app, tmp_path):
+    """PatientSex se conserva en el archivo limpio, así que una copia con otro sexo es otro contenido para la misma
+    instancia: va a cuarentena, el cotejo de la corrida lo marca y no hay zip. Y el estudio guardado muestra el conflicto."""
+    c = caso(tmp_path, "A")
+    for f in sorted((c / "SE1").iterdir()):
+        ds = pydicom.dcmread(f)
+        ds.PatientSex = "M"
+        ds.save_as(f.with_name(f.name + "_copia"), enforce_file_format=True)
+    t = correr(app, c, tmp_path)
+    pasos = {p["clave"]: p for p in t["pasos"]}
+    assert pasos["limpieza"]["estado"] == "aviso" and "4 en cuarentena" in pasos["limpieza"]["resumen"]
+    assert pasos["cotejo"]["estado"] == "error" and t["estado"] == "error" and t["zip"] is None      # no sale ningún paquete
+    app.indexar()
+    d = next(s["demografia"] for s in app.INDICE.values() if s["modalidad"] == "PT")
+    assert d["sexo"]["estado"] == "conflicto" and d["sexo"]["valores"] == ["F", "M"] and d["sexo"]["valor"] is None
+    assert d["etiqueta"] == "ANON-0001 · sexo en conflicto · 53 años en el estudio"
+
+
+def test_el_registro_antiguo_con_una_sola_observacion_por_archivo_se_sigue_leyendo():
+    una = {"e": ["c", 54, "años", False], "i": None, "s": "F"}
+    assert anon.observaciones_de_registro(una) == [una]
+    assert anon.observaciones_de_registro([una, {"e": ["c", 64, "años", False], "i": None, "s": "F"}])[1]["e"][1] == 64
+    assert anon.observaciones_de_registro(None) == [] and anon.observaciones_de_registro("basura") == []
+    registro = {}
+    anon.anotar_observacion(registro, "a.dcm", una)
+    anon.anotar_observacion(registro, "a.dcm", dict(una))            # idéntica: no se repite
+    anon.anotar_observacion(registro, "a.dcm", {**una, "s": "M"})    # distinta: se conserva
+    assert [o["s"] for o in registro["a.dcm"]] == ["F", "M"]
