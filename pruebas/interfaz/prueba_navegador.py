@@ -49,7 +49,7 @@ def main() -> int:
         token = re.search(r"t=([A-Za-z0-9_-]+)", (trabajo / "servidor.log").read_text(encoding="utf-8")).group(1)
         destino = RAIZ / a.capturas
         destino.mkdir(parents=True, exist_ok=True)
-        fallos: list[str] = []
+        fallos: list[str] = []          # comprobaciones fallidas; decide el código de salida. Ningún otro uso de este nombre.
 
         def ok(cond: bool, msg: str) -> None:
             print(("  OK   " if cond else "  FALLA ") + msg)
@@ -160,12 +160,12 @@ def main() -> int:
             expect(pag.locator("#rap-destino")).not_to_have_value("")
             pag.fill("#rap-origen", caso)
             # consulta de estado: las dos primeras peticiones fallan; la interfaz debe reintentar y terminar igualmente
-            fallos = {"quedan": 2, "vistos": 0}
+            consultas_cortadas = {"quedan": 2, "vistos": 0}
 
             def cortar_algunas(ruta):
-                if fallos["quedan"] > 0:
-                    fallos["quedan"] -= 1
-                    fallos["vistos"] += 1
+                if consultas_cortadas["quedan"] > 0:
+                    consultas_cortadas["quedan"] -= 1
+                    consultas_cortadas["vistos"] += 1
                     return ruta.abort()
                 return ruta.continue_()
 
@@ -178,7 +178,7 @@ def main() -> int:
             expect(pag.locator("#rap-pasos .insignia.error")).to_have_count(0)
             expect(pag.locator("#rap-revision")).not_to_have_class(re.compile(r"\boculto\b"))
             ok(True, "modo rápido: seis pasos sin fallos; el zip nace pendiente y los controles de revisión quedan a la vista")
-            ok(fallos["vistos"] == 2, "modo rápido: dos consultas de estado fallidas no dejan la pantalla colgada")
+            ok(consultas_cortadas["vistos"] == 2, "modo rápido: dos consultas de estado fallidas no dejan la pantalla colgada")
             pag.unroute("**/api/trabajo/*")
             # el visor de la corrida: exactamente los archivos del paquete, en el orden de sus nombres
             expect(pag.locator("#rap-visor")).not_to_have_class(re.compile(r"\boculto\b"), timeout=30000)
@@ -245,6 +245,7 @@ def main() -> int:
             pag.unroute("**/api/trabajo/*")
             nav.close()
         print(f"capturas en {destino}")
+        assert isinstance(fallos, list), "la lista de comprobaciones fallidas se ha sobrescrito"
         if fallos:
             print("FALLOS:", fallos)
             return 1
