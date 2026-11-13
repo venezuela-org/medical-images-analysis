@@ -280,3 +280,18 @@ def test_zip_sin_manifiesto_se_mantiene_en_el_inventario_incompleto(tmp_path):
     assert "FileNotFoundError" in inv["problemas"][0]["motivo"]
     assert m.diario()["inventario_de_paquetes"] == inv
     m.la_retirada_vale_y_el_zip_no_cambia()
+
+
+def test_nombre_de_zip_distinto_no_oculta_el_paquete_original(tmp_path):
+    m = Mesa(tmp_path)
+    datos = json.loads(m.manifiesto.read_text())
+    datos["zip"]["nombre"] = "paquete_otro.zip"
+    m.manifiesto.write_text(json.dumps(datos))
+    r = m.retirar()
+    inv = r["inventario_de_paquetes"]
+    assert r["estado"] == "completa" and inv["completo"] is False
+    assert [e["zip"] for e in inv["sin_determinar"]] == [m.zip.name]
+    assert [e["zip"] for e in r["paquetes_afectados"]] == [m.zip.name]
+    assert "no coincide" in inv["problemas"][0]["motivo"]
+    assert m.diario()["inventario_de_paquetes"] == inv
+    m.la_retirada_vale_y_el_zip_no_cambia()

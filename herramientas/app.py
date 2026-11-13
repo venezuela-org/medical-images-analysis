@@ -2267,7 +2267,12 @@ def _leer_manifiesto_local(ruta: Path) -> tuple[dict | None, str | None]:
         m = json.loads(datos.decode("utf-8"))
     except ValueError:
         return None, "su contenido no es JSON válido"
-    return (m, None) if _manifiesto_valido(m) else (None, "su estructura no es válida")
+    if not _manifiesto_valido(m):
+        return None, "su estructura no es válida"
+    esperado = nombre_canonico(ruta.name).replace(".manifiesto.json", ".zip")
+    if "zip" in m and m["zip"]["nombre"] != esperado:
+        return None, "el nombre del zip no coincide con el nombre del manifiesto"
+    return m, None
 
 
 def _manifiesto_dentro_del_zip(ruta_zip: Path) -> dict | None:
