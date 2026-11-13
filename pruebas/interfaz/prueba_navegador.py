@@ -219,6 +219,8 @@ def main() -> int:
             fila_corrida.locator("button", has_text="Retirar").click()
             pag.click("#btn-retirar")                               # sin nombre ni motivo: no retira
             expect(pag.locator("#retirada-resultado")).to_contain_text("Indica quién retira la revisión y por qué")
+            # Un zip huérfano deja incertidumbre persistente también en la fila de corrida.
+            (trabajo / "paquetes" / "paquete_sin_manifiesto.zip").write_bytes(b"zip ilegible de prueba")
             pag.fill("#retirar-quien", "prueba")
             pag.fill("#retirar-motivo", "registrada en una prueba automática")
             pag.click("#btn-retirar")
@@ -226,6 +228,24 @@ def main() -> int:
             expect(pag.locator("#retirada-resultado")).to_contain_text("ya no deben compartirse")
             expect(pag.locator("#retirada-resultado")).to_contain_text("Retirar no cambia los zips ya exportados")
             expect(fila("Corrida ·")).to_contain_text("retirada el")
+            pag.click("nav.pestanas button[data-tab=rapido]")
+            pag.click("nav.pestanas button[data-tab=registro]")
+            expect(fila("Corrida ·")).to_contain_text("lista de paquetes puede estar incompleta")
+            expect(fila("Corrida ·")).to_contain_text("paquete_sin_manifiesto.zip")
+            # Diarios antiguos o dañados: la incertidumbre sigue visible al reabrir Registro.
+            diario = next((trabajo / "limpios_REPORTES" / "retiradas").glob("retirada_*.json"))
+            guardado = json.loads(diario.read_text(encoding="utf-8"))
+            for inventario in (None, {"completo": True, "problemas": 1, "sin_determinar": []}):
+                datos = dict(guardado)
+                if inventario is None:
+                    datos.pop("inventario_de_paquetes", None)
+                else:
+                    datos["inventario_de_paquetes"] = inventario
+                diario.write_text(json.dumps(datos), encoding="utf-8")
+                pag.click("nav.pestanas button[data-tab=rapido]")
+                pag.click("nav.pestanas button[data-tab=registro]")
+                expect(fila("Corrida ·")).to_contain_text("no se sabe si la lista de paquetes está completa")
+            diario.write_text(json.dumps(guardado), encoding="utf-8")
             expect(fila("Paciente ·")).to_contain_text("revisión retirada")
             ok(True, "Registro: retirar la revisión de la corrida deja constancia de quién y por qué, y señala el paquete afectado")
             pag.click("nav.pestanas button[data-tab=rapido]")
