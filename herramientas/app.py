@@ -2831,7 +2831,7 @@ HTML = """<!doctype html>
   <div id="revisiones-estado"></div>
   <div id="diarios-problemas"></div>
   <div id="retiradas-a-medias" class="oculto"><div id="retiradas-a-medias-texto"></div><div class="fila"><button id="btn-reanudar">Terminar las retiradas pendientes</button></div></div>
-  <div class="tabla-marco"><table id="tabla-revisiones"><thead><tr><th>Alcance</th><th>Estado</th><th>Quién y cuándo</th><th>Archivos</th><th>Paquete</th><th></th></tr></thead><tbody></tbody></table></div>
+  <div class="tabla-marco oculto" id="marco-revisiones"><table id="tabla-revisiones" class="datos"><thead><tr><th>Alcance</th><th>Estado</th><th>Quién y cuándo</th><th>Archivos</th><th>Paquete</th><th></th></tr></thead><tbody></tbody></table></div>
   <div id="retirar-form" class="oculto">
     <h3 id="retirar-titulo">Retirar revisión</h3>
     <div class="fila"><input type="text" id="retirar-quien" placeholder="quien retira" class="corto"><input type="text" id="retirar-motivo" placeholder="motivo de la retirada"></div>
@@ -3079,7 +3079,11 @@ $('#btn-origen').onclick = async () => {
 };
 $('#btn-demo').onclick = async () => {
   $('#btn-demo').disabled = true; mensaje('#aviso-origen', 'neutro', 'creando caso sintético…');
-  try { const r = await api('demo', {}); $('#origen').value = r.ruta; mensaje('#aviso-origen', 'ok', 'Caso sintético listo (identidad ficticia, sin datos reales). Pulsa Anonimizar para recorrer el flujo completo.'); }
+  try {
+    const r = await api('demo', {}); $('#origen').value = r.ruta;
+    $('#rap-origen').value = r.ruta;                                  // la pestaña Rápido queda lista con esta misma carpeta
+    mensaje('#aviso-origen', 'ok', 'Caso sintético listo (identidad ficticia, sin datos reales). Su carpeta ya está escrita también en la pestaña Rápido: allí se anonimiza con un solo botón. Aquí, Anonimizar hace solo la limpieza.');
+  }
   catch (err) { mensaje('#aviso-origen', 'error', err.message); } finally { $('#btn-demo').disabled = false; }
 };
 $('#btn-anonimizar').onclick = async () => {
@@ -3309,6 +3313,7 @@ async function cargarRevisiones() {
     quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
     paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', ') + (p.inventario_de_paquetes && p.inventario_de_paquetes.completo === false ? ' · lista incompleta' : ''), retirable: p.se_puede_retirar});
   mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
+  $('#marco-revisiones').classList.toggle('oculto', filas.length === 0);
   const prob = r.diarios_con_problemas || [];
   mensaje('#diarios-problemas', r.retiradas_no_verificables ? 'error' : 'aviso', !prob.length ? '' :
     (r.retiradas_no_verificables ? 'No se puede verificar el estado de las retiradas. Requiere atención: ' + prob.map(x => x.diario + ' (' + x.motivo + ')').join('; ') +
