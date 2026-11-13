@@ -54,6 +54,7 @@ Para saber qué paquetes dependían de la revisión que se retira, la aplicació
 
 - Si su zip sigue en la carpeta de paquetes, su manifiesto puede indicar una dependencia y el paquete se incluye como "recuperado del zip". Sin el hash original registrado al publicar, no se puede verificar que ese zip no haya sido sustituido: también queda "sin determinar" y el inventario incompleto, incluso si el manifiesto interno cita otra revisión. Un registro de corrida que ya identifica el paquete conserva su evidencia independiente.
 - Si su zip no está allí, o tampoco se puede leer, el paquete queda "sin determinar" y la lista de afectados se marca como incompleta. Hay que tratarlo como afectado hasta comprobarlo.
+- Los zips de paquete sin manifiesto local también se examinan y quedan sin determinar cuando falta evidencia independiente de su identidad.
 - Si la carpeta de paquetes no se deja listar, la lista entera se marca como incompleta.
 
 Se rechazan también los objetos JSON con campos obligatorios ausentes o de tipo incorrecto, incluidas las referencias de revisión incompletas.

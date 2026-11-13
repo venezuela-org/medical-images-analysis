@@ -2309,6 +2309,11 @@ def inventario_de_paquetes(alcance: list[dict]) -> dict:
     manifiestos = [n for n in nombres if n.startswith("paquete_") and n.endswith(".manifiesto.json")] + \
                   [n for n in nombres if n.startswith("paquete_") and n.endswith(".manifiesto.json" + SUFIJO_PREPARADO)]
 
+    # Un zip sin manifiesto también es evidencia de un paquete: no se puede omitir del inventario.
+    con_manifiesto = {nombre_canonico(n).replace(".manifiesto.json", ".zip") for n in manifiestos}
+    manifiestos += [n[:-4] + ".manifiesto.json" for n in nombres
+                    if n.startswith("paquete_") and n.endswith(".zip") and n not in con_manifiesto]
+
     def cita(bloque: dict, pac: str, a: dict) -> bool:
         """¿El manifiesto cita exactamente el registro que se retira? Por su sha256; los manifiestos anteriores a ese campo
         solo llevan la fecha de la revisión, y se comparan por ella."""
@@ -3344,11 +3349,11 @@ async function cargarRevisiones() {
   for (const c of r.corridas) filas.push({tipo: 'corrida', id: c.registro, alcance: 'Corrida · ' + c.pacientes.join(', ') + (c.provisional ? ' (registro con nombre provisional)' : ''),
     estado: c.no_verificable ? ['aviso', '! no se puede verificar si está retirada'] : (c.retirada ? ['aviso', '! retirada el ' + c.retirada.fecha + ' por ' + c.retirada.quien + ': ' + c.retirada.motivo] : ['ok', '✓ registrada, sin hallazgos']),
     quien: (c.revisor || '') + ' · ' + (c.fecha || ''), archivos: c.archivos + (c.mostrado ? ' (' + c.mostrado.cuadros_mostrados + ' cuadros mostrados)' : ''),
-    paquete: c.zip && c.zip.nombre ? c.zip.nombre + (c.zip.existe ? ' · sigue en ' + c.zip.destino : ' · ya no está en ' + c.zip.destino) : '', retirable: c.se_puede_retirar});
+    paquete: (c.zip && c.zip.nombre ? c.zip.nombre + (c.zip.existe ? ' · sigue en ' + c.zip.destino : ' · ya no está en ' + c.zip.destino) : '') + notaInventario(c.inventario_de_paquetes), retirable: c.se_puede_retirar});
   for (const p of r.pacientes) filas.push({tipo: 'paciente', id: p.paciente, alcance: 'Paciente · ' + p.paciente,
     estado: p.estado === 'retirada' ? ['aviso', '! ' + p.detalle] : (p.estado === 'sin_hallazgos' && p.vigente ? ['ok', '✓ sin hallazgos, vigente'] : ['aviso', '! ' + (p.estado === 'con_hallazgos' ? 'con hallazgos' : 'pendiente') + ': ' + (p.detalle || '')]),
     quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
-    paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', ') + (p.inventario_de_paquetes && p.inventario_de_paquetes.completo === false ? ' · lista incompleta' : ''), retirable: p.se_puede_retirar});
+    paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', ') + notaInventario(p.inventario_de_paquetes), retirable: p.se_puede_retirar});
   mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
   $('#marco-revisiones').classList.toggle('oculto', filas.length === 0);
   const prob = r.diarios_con_problemas || [];

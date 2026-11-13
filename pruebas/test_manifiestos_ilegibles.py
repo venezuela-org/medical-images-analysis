@@ -265,3 +265,16 @@ def test_zip_sustituido_no_demuestra_que_el_original_era_ajeno(tmp_path):
     assert m.diario()["inventario_de_paquetes"] == inv
     assert m.app.leer_revision(m.pac)["lista_para_compartir"] is False
     assert m.zip.read_bytes() == reemplazo
+
+
+def test_zip_sin_manifiesto_se_mantiene_en_el_inventario_incompleto(tmp_path):
+    m = Mesa(tmp_path)
+    m.manifiesto.unlink()
+    r = m.retirar()
+    inv = r["inventario_de_paquetes"]
+    assert r["estado"] == "completa" and inv["completo"] is False
+    assert [e["zip"] for e in inv["sin_determinar"]] == [m.zip.name]
+    assert inv["problemas"][0]["manifiesto"] == m.manifiesto.name
+    assert "FileNotFoundError" in inv["problemas"][0]["motivo"]
+    assert m.diario()["inventario_de_paquetes"] == inv
+    m.la_retirada_vale_y_el_zip_no_cambia()

@@ -219,6 +219,8 @@ def main() -> int:
             fila_corrida.locator("button", has_text="Retirar").click()
             pag.click("#btn-retirar")                               # sin nombre ni motivo: no retira
             expect(pag.locator("#retirada-resultado")).to_contain_text("Indica quién retira la revisión y por qué")
+            # Un zip huérfano deja incertidumbre persistente también en la fila de corrida.
+            (trabajo / "paquetes" / "paquete_sin_manifiesto.zip").write_bytes(b"zip ilegible de prueba")
             pag.fill("#retirar-quien", "prueba")
             pag.fill("#retirar-motivo", "registrada en una prueba automática")
             pag.click("#btn-retirar")
@@ -226,6 +228,10 @@ def main() -> int:
             expect(pag.locator("#retirada-resultado")).to_contain_text("ya no deben compartirse")
             expect(pag.locator("#retirada-resultado")).to_contain_text("Retirar no cambia los zips ya exportados")
             expect(fila("Corrida ·")).to_contain_text("retirada el")
+            pag.click("nav.pestanas button[data-tab=rapido]")
+            pag.click("nav.pestanas button[data-tab=registro]")
+            expect(fila("Corrida ·")).to_contain_text("lista de paquetes puede estar incompleta")
+            expect(fila("Corrida ·")).to_contain_text("paquete_sin_manifiesto.zip")
             expect(fila("Paciente ·")).to_contain_text("revisión retirada")
             ok(True, "Registro: retirar la revisión de la corrida deja constancia de quién y por qué, y señala el paquete afectado")
             pag.click("nav.pestanas button[data-tab=rapido]")
