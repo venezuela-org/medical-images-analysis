@@ -215,7 +215,7 @@ def test_la_funcion_que_devuelve_solo_la_lista_sigue_existiendo(tmp_path, monkey
     assert app.inventario_de_paquetes(alcance)["completo"] is False   # ...el inventario, sí
 
 
-@pytest.mark.parametrize("defecto", ["vacio", "revision_lista", "sin_pacientes", "sin_pendientes", "sin_revision", "paciente_sin_revision", "revision_sin_identidad", "zip_lista", "revisado_y_pendiente"])
+@pytest.mark.parametrize("defecto", ["vacio", "revision_lista", "sin_pacientes", "sin_pendientes", "sin_revision", "paciente_sin_revision", "revision_sin_identidad", "zip_lista", "revisado_y_pendiente", "revision_fuera_del_inventario"])
 def test_estructura_incompleta_no_oculta_un_paquete(tmp_path, defecto):
     m = Mesa(tmp_path)
     datos = json.loads(m.manifiesto.read_text())
@@ -227,6 +227,8 @@ def test_estructura_incompleta_no_oculta_un_paquete(tmp_path, defecto):
         datos.pop({"sin_pacientes": "pacientes", "sin_pendientes": "revision_pixeles_pendiente", "sin_revision": "revision_pixeles"}[defecto])
     elif defecto == "paciente_sin_revision":
         datos["revision_pixeles"] = {}
+    elif defecto == "revision_fuera_del_inventario":
+        datos["revision_pixeles"]["ANON-AJENO"] = dict(datos["revision_pixeles"][m.pac])
     elif defecto == "revisado_y_pendiente":
         datos["revision_pixeles_pendiente"] = [m.pac]
     elif defecto == "revision_sin_identidad":
@@ -295,3 +297,27 @@ def test_nombre_de_zip_distinto_no_oculta_el_paquete_original(tmp_path):
     assert "no coincide" in inv["problemas"][0]["motivo"]
     assert m.diario()["inventario_de_paquetes"] == inv
     m.la_retirada_vale_y_el_zip_no_cambia()
+
+
+
+def test_manifiesto_interno_no_sustituye_la_evidencia_local(tmp_path):
+    m = Mesa(tmp_path)
+    datos = json.loads(m.manifiesto.read_text())
+    datos.pop("zip")
+    datos["revision_pixeles"][m.pac]["registro_sha256"] = "a" * 64
+    m.manifiesto.write_text(json.dumps(datos))
+    r = m.retirar()
+    assert r["estado"] == "completa"
+    assert r["inventario_de_paquetes"]["completo"] is False
+    assert [e["zip"] for e in r["inventario_de_paquetes"]["sin_determinar"]] == [m.zip.name]
+    m.la_retirada_vale_y_el_zip_no_cambia()
+
+
+@pytest.mark.parametrize("inventario", [None, {}, {"completo": True, "problemas": 1, "sin_determinar": []},
+    {"completo": True, "problemas": [], "sin_determinar": 1},
+    {"completo": True, "problemas": [1], "sin_determinar": []},
+    {"completo": "true", "problemas": [], "sin_determinar": []}])
+def test_inventario_guardado_invalido_o_antiguo_no_se_da_por_completo(inventario):
+    app = cargar("app_inventario", RAIZ / "herramientas" / "app.py")
+    r = app.resumen_de_inventario({"inventario_de_paquetes": inventario})
+    assert r["completo"] is None

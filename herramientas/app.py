@@ -2237,6 +2237,8 @@ def _manifiesto_valido(m) -> bool:
         return (isinstance(revision["alcance"], str) and bool(revision["alcance"])
                 and revision.get("estado") in ("pendiente", "sin_hallazgos")
                 and set(pendientes) == (set() if revision["estado"] == "sin_hallazgos" else set(pacientes)))
+    if set(revision) != set(pacientes):
+        return False
     for pac in pacientes:
         r = revision.get(pac)
         if not isinstance(r, dict) or not isinstance(r.get("estado"), str):
@@ -2267,7 +2269,7 @@ def _leer_manifiesto_local(ruta: Path) -> tuple[dict | None, str | None]:
         m = json.loads(datos.decode("utf-8"))
     except ValueError:
         return None, "su contenido no es JSON válido"
-    if not _manifiesto_valido(m):
+    if not _manifiesto_valido(m) or "zip" not in m:
         return None, "su estructura no es válida"
     esperado = nombre_canonico(ruta.name).replace(".manifiesto.json", ".zip")
     if "zip" in m and m["zip"]["nombre"] != esperado:
@@ -2397,7 +2399,13 @@ def resumen_de_inventario(d: dict) -> dict:
     inv = d.get("inventario_de_paquetes")
     if not isinstance(inv, dict):
         return {"completo": None, "problemas": [], "sin_determinar": []}
-    return {"completo": bool(inv.get("completo")), "problemas": list(inv.get("problemas") or []), "sin_determinar": list(inv.get("sin_determinar") or [])}
+    if (not isinstance(inv.get("completo"), bool)
+            or any(not isinstance(inv.get(k), list)
+                   or any(not isinstance(e, dict) or not isinstance(e.get("motivo"), str) for e in inv[k])
+                   for k in ("problemas", "sin_determinar"))):
+        return {"completo": None, "problemas": [], "sin_determinar": [],
+                "motivo": "el inventario guardado tiene una estructura no válida"}
+    return {"completo": inv["completo"], "problemas": list(inv["problemas"]), "sin_determinar": list(inv["sin_determinar"])}
 
 
 def _elemento_paciente(pac: str, incluida_por: str) -> dict | None:
@@ -3344,8 +3352,11 @@ async function registrarRevision(estado) {
 $('#rev-sin').onclick = () => registrarRevision('sin_hallazgos'); $('#rev-con').onclick = () => registrarRevision('con_hallazgos');
 function notaInventario(inv) {
   if (!inv) return '';
+  if (inv.completo == null) return ' ATENCIÓN: no se sabe si la lista de paquetes está completa. ' +
+    (inv.motivo || 'Esta retirada no tiene un inventario verificable de paquetes.') + ' Trátala como incompleta hasta comprobarla.';
   const dudosos = inv.sin_determinar || [], recuperados = (inv.problemas || []).filter(x => x.recuperado_del_zip);
-  return (dudosos.length ? ' ATENCIÓN: la lista de paquetes puede estar incompleta. No se pudo averiguar si dependen de esta revisión: ' +
+  return (inv.completo === false && !dudosos.length ? ' ATENCIÓN: la lista de paquetes está incompleta; requiere comprobación.' : '') +
+    (dudosos.length ? ' ATENCIÓN: la lista de paquetes puede estar incompleta. No se pudo averiguar si dependen de esta revisión: ' +
       dudosos.map(e => e.zip + ' (' + e.motivo + (e.existe ? '; el zip sigue en ' + e.ruta : '') + ')').join('; ') + '. Trátalos como afectados hasta comprobarlos.' : '') +
     (recuperados.length ? ' Manifiestos locales ilegibles cuya información se tomó del propio zip: ' + recuperados.map(e => e.manifiesto + ' (' + e.motivo + ')').join('; ') + '.' : '');
 }
