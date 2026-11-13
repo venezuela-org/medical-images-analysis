@@ -48,6 +48,16 @@ El empaquetado de la pestaña Enviar, las retiradas, las corridas del modo rápi
 
 El manifiesto de un paquete de Enviar cita la revisión de cada paciente por el sha256 de su registro (`registro_sha256`). Con ese identificador, y no con la fecha, se reconocen los paquetes que dependen de una revisión cuando se retira. Los manifiestos anteriores a este campo se siguen reconociendo por la fecha de la revisión.
 
+### Cuando no se puede leer el manifiesto de un paquete
+
+Para saber qué paquetes dependían de la revisión que se retira, la aplicación lee los manifiestos locales de `datos-pet/paquetes`. Si alguno no se puede leer (sin permiso, contenido que no es JSON, estructura no válida), la retirada se hace igual y se dice qué pasó con ese paquete:
+
+- Si su zip sigue en la carpeta de paquetes, la dependencia se averigua con el manifiesto que va dentro del zip. El paquete aparece en la lista si dependía de la revisión, marcado como "recuperado del zip", y el manifiesto ilegible se anota con su motivo.
+- Si su zip no está allí, o tampoco se puede leer, el paquete queda "sin determinar" y la lista de afectados se marca como incompleta. Hay que tratarlo como afectado hasta comprobarlo.
+- Si la carpeta de paquetes no se deja listar, la lista entera se marca como incompleta.
+
+El estado de la lista queda en el diario de la retirada, en el campo `inventario_de_paquetes`, y se muestra en Registro.
+
 ### Evidencias con nombre provisional
 
 El registro de la revisión de una corrida y el manifiesto local de un paquete se escriben con el sufijo `.preparada` antes de publicar el zip, y lo pierden al confirmarse la publicación. Si el zip se publica y ese último renombrado falla, la evidencia se queda con el sufijo. Sigue siendo la evidencia de un paquete publicado, y como tal se trata:

@@ -89,7 +89,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.11"
+VERSION = "0.9.12"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -1861,7 +1861,8 @@ def evaluar_registro_revision(r: dict, actuales: dict[str, str]) -> dict:
         ret = r.get("retirada") or {}
         return {"paciente": r.get("paciente"), "estado": "retirada", "vigente": False, "lista_para_compartir": False,
                 "detalle": f"revisión retirada el {ret.get('fecha', '')} por {ret.get('quien', '')}: {ret.get('motivo', '')}",
-                "retirada": ret, "sustituye_a": r.get("sustituye_a"), "paquetes_afectados": r.get("paquetes_afectados", [])}
+                "retirada": ret, "sustituye_a": r.get("sustituye_a"), "paquetes_afectados": r.get("paquetes_afectados", []),
+                "inventario_de_paquetes": resumen_de_inventario(r)}
     vigente = actuales == r.get("archivos", {})
     r2 = {k: v for k, v in r.items() if k != "archivos"}
     r2["archivos_revisados"] = len(r.get("archivos", {}))
@@ -1905,7 +1906,8 @@ def leer_revision(pac: str) -> dict:
         return {"paciente": pac, "estado": "retirada", "vigente": False, "lista_para_compartir": False,
                 "detalle": f"revisión retirada el {ret['fecha']} por {ret['quien']}: {ret['motivo']} (su registro está pendiente de actualizar)",
                 "retirada": ret, "retirada_id": diario["id"], "registro_pendiente_de_actualizar": True,
-                "paquetes_afectados": diario.get("paquetes_afectados", []), "registro_sha256": huella}
+                "paquetes_afectados": diario.get("paquetes_afectados", []), "inventario_de_paquetes": resumen_de_inventario(diario),
+                "registro_sha256": huella}
     return {**evaluar_registro_revision(r, hashes_paciente(pac)), "registro_sha256": huella}
 
 
@@ -2072,7 +2074,8 @@ class RetiradaIncompleta(Exception):
                 "retirada": self.diario["id"], "comprometida": True, "estado": "incompleta", "quien": ret["quien"], "fecha": ret["fecha"],
                 "motivo": ret["motivo"], "completadas": self.completadas, "pendientes": self.pendientes, "error": self.error,
                 "retiradas": [{"tipo": a["tipo"], "id": a["id"]} for a in self.diario["alcance"]],
-                "paquetes_afectados": self.diario.get("paquetes_afectados", []), "nota": NOTA_RETIRADA}
+                "paquetes_afectados": self.diario.get("paquetes_afectados", []), "inventario_de_paquetes": resumen_de_inventario(self.diario),
+                "nota": NOTA_RETIRADA}
 
 
 def carpeta_retiradas() -> Path:
@@ -2211,25 +2214,96 @@ def _sha_de(ruta: Path) -> str | None:
         return None
 
 
-def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
-    """Los paquetes revisados cuya revisión es, exactamente, una de las que se retiran. Para una corrida, su propio zip.
-    Para la revisión de un paciente, los paquetes de la pestaña Enviar que la citan: mismo paciente y misma fecha de
-    revisión en su manifiesto. Un paquete revisado con otra revisión del mismo paciente no entra. De cada uno: nombre,
-    destino, si sigue existiendo allí y si sigue siendo el mismo archivo."""
+def _manifiesto_valido(m) -> bool:
+    return (isinstance(m, dict) and isinstance(m.get("pacientes", []), list) and isinstance(m.get("revision_pixeles") or {}, dict)
+            and isinstance(m.get("revision_pixeles_pendiente", []), list) and isinstance(m.get("zip") or {}, dict))
+
+
+def _leer_manifiesto_local(ruta: Path) -> tuple[dict | None, str | None]:
+    """(manifiesto, None) si se puede leer y tiene la forma esperada; (None, motivo) si no. El motivo no lleva contenido."""
+    try:
+        datos = ruta.read_bytes()
+    except OSError as e:
+        return None, f"no se puede leer ({type(e).__name__})"
+    try:
+        m = json.loads(datos.decode("utf-8"))
+    except ValueError:
+        return None, "su contenido no es JSON válido"
+    return (m, None) if _manifiesto_valido(m) else (None, "su estructura no es válida")
+
+
+def _manifiesto_dentro_del_zip(ruta_zip: Path) -> dict | None:
+    """El manifiesto que viaja dentro del propio zip: dice lo mismo que el local sobre la revisión de cada paciente."""
+    try:
+        with zipfile.ZipFile(ruta_zip) as z:
+            m = json.loads(z.read("manifiesto.json").decode("utf-8"))
+    except Exception:
+        return None
+    return m if _manifiesto_valido(m) else None
+
+
+def inventario_de_paquetes(alcance: list[dict]) -> dict:
+    """Los paquetes revisados cuya revisión es, exactamente, una de las que se retiran, y lo que no se pudo averiguar.
+
+    Para una corrida, su propio zip. Para la revisión de un paciente, los paquetes de la pestaña Enviar que la citan (por el
+    sha256 de su registro; por la fecha, en manifiestos anteriores a ese campo). De cada uno: nombre, destino, si sigue
+    existiendo allí y si sigue siendo el mismo archivo.
+
+    Un manifiesto local que no se puede leer no se salta en silencio:
+      - se anota en `problemas`, con su motivo;
+      - si el zip sigue en la carpeta de paquetes, la dependencia se averigua con el manifiesto que va dentro del zip;
+      - si no, ese paquete va a `sin_determinar` y el inventario queda marcado como incompleto.
+    Devuelve {'afectados', 'completo', 'problemas', 'sin_determinar'}. No lanza: un inventario incompleto no impide retirar."""
     corridas = [a for a in alcance if a["tipo"] == "corrida"]
     pacientes = {a["id"]: a for a in alcance if a["tipo"] == "paciente"}
     zips_de_corrida = {(a.get("zip") or {}).get("nombre"): a for a in corridas if (a.get("zip") or {}).get("nombre")}
     encontrados: dict[str, dict] = {}
+    problemas: list[dict] = []
+    sin_determinar: list[dict] = []
     carpeta = TRABAJO / "paquetes"
+    try:
+        nombres = sorted(os.listdir(carpeta))
+    except FileNotFoundError:
+        nombres = []
+    except OSError as e:
+        nombres = []
+        problemas.append({"manifiesto": "paquetes/", "motivo": f"no se puede listar la carpeta de paquetes ({type(e).__name__})",
+                          "zip": None, "zip_en_paquetes": False, "recuperado_del_zip": False})
+        sin_determinar.append({"zip": "todos los de la carpeta de paquetes", "ruta": str(carpeta), "existe": None,
+                               "motivo": f"no se puede listar la carpeta de paquetes ({type(e).__name__})"})
     # los confirmados primero; después los que quedaron con nombre provisional tras publicarse su zip
-    manifiestos = (sorted(carpeta.glob("paquete_*.manifiesto.json")) + sorted(carpeta.glob("paquete_*.manifiesto.json" + SUFIJO_PREPARADO))) if carpeta.is_dir() else []
-    for manifiesto in manifiestos:
-        try:
-            m = json.loads(manifiesto.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        z = m.get("zip") or {}
-        nombre = z.get("nombre") or nombre_canonico(manifiesto.name).replace(".manifiesto.json", ".zip")
+    manifiestos = [n for n in nombres if n.startswith("paquete_") and n.endswith(".manifiesto.json")] + \
+                  [n for n in nombres if n.startswith("paquete_") and n.endswith(".manifiesto.json" + SUFIJO_PREPARADO)]
+
+    def cita(bloque: dict, pac: str, a: dict) -> bool:
+        """¿El manifiesto cita exactamente el registro que se retira? Por su sha256; los manifiestos anteriores a ese campo
+        solo llevan la fecha de la revisión, y se comparan por ella."""
+        b = bloque.get(pac) or {}
+        if not isinstance(b, dict):
+            return False
+        if b.get("registro_sha256"):
+            return b["registro_sha256"] == a.get("sha256")
+        return b.get("fecha") == a.get("fecha_revision")
+
+    for archivo in manifiestos:
+        zip_por_nombre = nombre_canonico(archivo).replace(".manifiesto.json", ".zip")
+        m, motivo = _leer_manifiesto_local(carpeta / archivo)
+        recuperado = False
+        if m is None:
+            zip_local = carpeta / zip_por_nombre
+            m = _manifiesto_dentro_del_zip(zip_local) if zip_local.is_file() else None
+            recuperado = m is not None
+            problemas.append({"manifiesto": archivo, "motivo": motivo, "zip": zip_por_nombre, "zip_en_paquetes": zip_local.is_file(),
+                              "recuperado_del_zip": recuperado})
+            registrar(f"retirada: el manifiesto {archivo} {motivo}" + ("; su información se tomó del propio zip" if recuperado else "; no se pudo determinar si depende de la revisión"))
+            if m is None:
+                if zip_por_nombre not in zips_de_corrida and zip_por_nombre not in encontrados:    # el zip de una corrida se conoce por su registro
+                    sin_determinar.append({"zip": zip_por_nombre, "ruta": str(zip_local), "existe": zip_local.is_file(), "motivo": f"su manifiesto local {motivo}"})
+                continue
+            z = {"nombre": zip_por_nombre, "destino": str(carpeta), "sha256": None}                # el sha256 anotado al publicar no se conoce
+        else:
+            z = m.get("zip") or {}
+        nombre = z.get("nombre") or zip_por_nombre
         if nombre in encontrados:
             continue
         bloque = m.get("revision_pixeles") or {}
@@ -2238,23 +2312,16 @@ def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
                 continue
             afectados = sorted(m.get("pacientes", []))
         else:                                                         # paquete de Enviar: depende de la revisión de cada paciente
-            def cita(pac: str, a: dict) -> bool:
-                """¿El manifiesto cita exactamente el registro que se retira? Por su sha256; los manifiestos anteriores a
-                ese campo solo llevan la fecha de la revisión, y se comparan por ella."""
-                b = bloque.get(pac) or {}
-                if b.get("registro_sha256"):
-                    return b["registro_sha256"] == a.get("sha256")
-                return b.get("fecha") == a.get("fecha_revision")
             afectados = sorted(pac for pac, a in pacientes.items()
-                               if pac in m.get("pacientes", []) and pac not in m.get("revision_pixeles_pendiente", []) and cita(pac, a))
+                               if pac in m.get("pacientes", []) and pac not in m.get("revision_pixeles_pendiente", []) and cita(bloque, pac, a))
             if not afectados:
                 continue
         encontrados[nombre] = {"zip": nombre, "destino": z.get("destino") or str(carpeta), "sha256": z.get("sha256"),
-                               "creado": m.get("creado"), "pacientes": afectados}
+                               "creado": m.get("creado"), "pacientes": afectados, "recuperado_del_zip": recuperado}
     for nombre, a in zips_de_corrida.items():                         # el zip de la corrida, aunque su manifiesto local ya no esté
         encontrados.setdefault(nombre, {"zip": nombre, "destino": a["zip"].get("destino"), "sha256": a["zip"].get("sha256"),
-                                        "creado": None, "pacientes": sorted(a.get("pacientes", []))})
-    out = []
+                                        "creado": None, "pacientes": sorted(a.get("pacientes", [])), "recuperado_del_zip": False})
+    afectados_out = []
     for e in encontrados.values():
         ruta = Path(e["destino"] or "") / e["zip"]
         existe = ruta.is_file()
@@ -2262,8 +2329,24 @@ def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
             mismo = bool(existe and e["sha256"] and sha256_archivo(ruta) == e["sha256"])
         except OSError:
             mismo = False
-        out.append({**e, "ruta": str(ruta), "existe": existe, "es_el_mismo_archivo": mismo if e["sha256"] else None})
-    return sorted(out, key=lambda e: e["zip"])
+        afectados_out.append({**e, "ruta": str(ruta), "existe": existe, "es_el_mismo_archivo": mismo if e["sha256"] else None})
+    sin_determinar = [x for x in sin_determinar if x["zip"] not in encontrados]
+    return {"afectados": sorted(afectados_out, key=lambda e: e["zip"]), "completo": not sin_determinar,
+            "problemas": problemas, "sin_determinar": sorted(sin_determinar, key=lambda e: e["zip"])}
+
+
+def paquetes_que_dependen_de(alcance: list[dict]) -> list[dict]:
+    """Solo la lista de afectados. Quien necesite saber si esa lista está completa debe usar inventario_de_paquetes()."""
+    return inventario_de_paquetes(alcance)["afectados"]
+
+
+def resumen_de_inventario(d: dict) -> dict:
+    """El estado del inventario de paquetes de una retirada, tal como quedó en su diario. Los diarios anteriores a este
+    campo no lo llevan: entonces no se sabe si la lista estaba completa."""
+    inv = d.get("inventario_de_paquetes")
+    if not isinstance(inv, dict):
+        return {"completo": None, "problemas": [], "sin_determinar": []}
+    return {"completo": bool(inv.get("completo")), "problemas": list(inv.get("problemas") or []), "sin_determinar": list(inv.get("sin_determinar") or [])}
 
 
 def _elemento_paciente(pac: str, incluida_por: str) -> dict | None:
@@ -2353,6 +2436,7 @@ def _hacer_accion(d: dict, accion: dict) -> None:
                                      "sha256_registro": elemento["sha256"], "retirada": d["retirada"], "incluida_por": elemento["incluida_por"],
                                      "pacientes": elemento.get("pacientes", []), "archivos": elemento.get("archivos"), "revisor": elemento.get("revisor"),
                                      "fecha_revision": elemento.get("fecha_revision"), "paquetes_afectados": d.get("paquetes_afectados", []),
+                                     "inventario_de_paquetes": resumen_de_inventario(d),
                                      "nota": NOTA_RETIRADA, "app": VERSION})
         return
     pac = elemento["id"]
@@ -2374,7 +2458,8 @@ def _hacer_accion(d: dict, accion: dict) -> None:
                           "incluida_por": elemento["incluida_por"],
                           "sustituye_a": {**referencia, "estado": elemento.get("estado_revision"), "revisor": elemento.get("revisor"),
                                           "fecha": elemento.get("fecha_revision"), "archivos": elemento.get("archivos"), "origen": elemento.get("origen")},
-                          "paquetes_afectados": d.get("paquetes_afectados", []), "nota": NOTA_RETIRADA, "app": VERSION})
+                          "paquetes_afectados": d.get("paquetes_afectados", []), "inventario_de_paquetes": resumen_de_inventario(d),
+                          "nota": NOTA_RETIRADA, "app": VERSION})
 
 
 def completar_retirada(d: dict) -> dict:
@@ -2405,7 +2490,7 @@ def completar_retirada(d: dict) -> dict:
     ret = d["retirada"]
     return {"retirada": d["id"], "estado": "completa", "comprometida": True, "quien": ret["quien"], "fecha": ret["fecha"], "motivo": ret["motivo"],
             "retiradas": [{"tipo": a["tipo"], "id": a["id"]} for a in d["alcance"]], "completadas": completadas, "pendientes": [],
-            "paquetes_afectados": d.get("paquetes_afectados", []), "nota": NOTA_RETIRADA}
+            "paquetes_afectados": d.get("paquetes_afectados", []), "inventario_de_paquetes": resumen_de_inventario(d), "nota": NOTA_RETIRADA}
 
 
 def _diario_de(tipo: str, identificador: str) -> dict | None:
@@ -2465,9 +2550,12 @@ def retirar_revision(tipo: str, identificador: str, quien: str, motivo: str) -> 
             raise HTTPException(409, "no hay una revisión registrada que retirar" if tipo == "paciente"
                                 else "esa corrida no tiene una revisión registrada que retirar")
         fecha = dt.datetime.now().isoformat(timespec="seconds")
+        inventario = inventario_de_paquetes(alcance)                  # no impide retirar: lo que no se pudo averiguar queda dicho
         diario = {"id": f"{dt.datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(3)}", "retirada": {"quien": quien, "fecha": fecha, "motivo": motivo},
                   "solicitada": {"tipo": tipo, "id": identificador}, "alcance": alcance,
-                  "paquetes_afectados": paquetes_que_dependen_de(alcance), "acciones": _acciones_de(alcance),
+                  "paquetes_afectados": inventario["afectados"],
+                  "inventario_de_paquetes": {"completo": inventario["completo"], "problemas": inventario["problemas"], "sin_determinar": inventario["sin_determinar"]},
+                  "acciones": _acciones_de(alcance),
                   "estado": "comprometida; acciones pendientes", "reintentos": [], "nota": NOTA_RETIRADA, "app": VERSION}
         # ---- punto de compromiso: si el diario no se puede escribir, no se ha retirado nada ----
         try:
@@ -2523,6 +2611,7 @@ def revisiones_registradas() -> dict:
         pacientes.append({"paciente": pac, "estado": r.get("estado"), "vigente": r.get("vigente"), "detalle": r.get("detalle"),
                           "revisor": r.get("revisor"), "fecha": r.get("fecha"), "archivos": r.get("archivos_revisados"),
                           "origen": r.get("origen"), "retirada": r.get("retirada"), "paquetes_afectados": r.get("paquetes_afectados", []),
+                          "inventario_de_paquetes": r.get("inventario_de_paquetes"),
                           "se_puede_retirar": not bloqueo and (r.get("estado") in ("sin_hallazgos", "con_hallazgos")
                                                                or str(r.get("detalle", "")).startswith("invalidada"))})
     for canonico, ruta in registros_de_corrida():
@@ -2541,6 +2630,7 @@ def revisiones_registradas() -> dict:
                          "archivos": len(r.get("archivos", {})), "mostrado": r.get("mostrado"),
                          "zip": {"nombre": z.get("nombre"), "destino": z.get("destino"), "existe": zip_ruta.is_file() if z.get("nombre") else False},
                          "retirada": (diario or {}).get("retirada"), "paquetes_afectados": (diario or {}).get("paquetes_afectados", []),
+                         "inventario_de_paquetes": resumen_de_inventario(diario) if diario else None,
                          "no_verificable": bloqueo, "se_puede_retirar": diario is None and not bloqueo})
     incompletas = [{"retirada": d["id"], "quien": d["retirada"]["quien"], "fecha": d["retirada"]["fecha"], "motivo": d["retirada"]["motivo"],
                     "solicitada": d.get("solicitada"), "completadas": [a["descripcion"] for a in d["acciones"] if a["estado"] == "hecha"],
@@ -3197,6 +3287,13 @@ async function registrarRevision(estado) {
   finally { REV_GUARDANDO = false; if (vigente()) actualizarBotonesRevision(); }
 }
 $('#rev-sin').onclick = () => registrarRevision('sin_hallazgos'); $('#rev-con').onclick = () => registrarRevision('con_hallazgos');
+function notaInventario(inv) {
+  if (!inv) return '';
+  const dudosos = inv.sin_determinar || [], recuperados = (inv.problemas || []).filter(x => x.recuperado_del_zip);
+  return (dudosos.length ? ' ATENCIÓN: la lista de paquetes puede estar incompleta. No se pudo averiguar si dependen de esta revisión: ' +
+      dudosos.map(e => e.zip + ' (' + e.motivo + (e.existe ? '; el zip sigue en ' + e.ruta : '') + ')').join('; ') + '. Trátalos como afectados hasta comprobarlos.' : '') +
+    (recuperados.length ? ' Manifiestos locales ilegibles cuya información se tomó del propio zip: ' + recuperados.map(e => e.manifiesto + ' (' + e.motivo + ')').join('; ') + '.' : '');
+}
 let RETIRAR = null;
 async function cargarRevisiones() {
   const tb = $('#tabla-revisiones tbody'); tb.textContent = '';
@@ -3210,7 +3307,7 @@ async function cargarRevisiones() {
   for (const p of r.pacientes) filas.push({tipo: 'paciente', id: p.paciente, alcance: 'Paciente · ' + p.paciente,
     estado: p.estado === 'retirada' ? ['aviso', '! ' + p.detalle] : (p.estado === 'sin_hallazgos' && p.vigente ? ['ok', '✓ sin hallazgos, vigente'] : ['aviso', '! ' + (p.estado === 'con_hallazgos' ? 'con hallazgos' : 'pendiente') + ': ' + (p.detalle || '')]),
     quien: p.estado === 'retirada' ? '' : (p.revisor || '') + ' · ' + (p.fecha || ''), archivos: p.archivos == null ? '' : String(p.archivos),
-    paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', '), retirable: p.se_puede_retirar});
+    paquete: (p.paquetes_afectados || []).map(e => e.zip).join(', ') + (p.inventario_de_paquetes && p.inventario_de_paquetes.completo === false ? ' · lista incompleta' : ''), retirable: p.se_puede_retirar});
   mensaje('#revisiones-estado', 'neutro', filas.length ? '' : 'No hay ninguna revisión registrada.');
   const prob = r.diarios_con_problemas || [];
   mensaje('#diarios-problemas', r.retiradas_no_verificables ? 'error' : 'aviso', !prob.length ? '' :
@@ -3248,7 +3345,7 @@ $('#btn-retirar').onclick = async () => {
     const paquetes = r.paquetes_afectados || [];
     mensaje('#retirada-resultado', 'aviso', 'Revisión retirada (' + r.retiradas.map(x => x.tipo + ' ' + x.id).join('; ') + '). El registro original se conserva. ' +
       (paquetes.length ? 'Estos paquetes se crearon con esa revisión y ya no deben compartirse: ' + paquetes.map(e => e.ruta + (e.existe ? (e.es_el_mismo_archivo === false ? ' (existe, pero ya no es el mismo archivo)' : ' (sigue ahí)') : ' (ya no está en esa carpeta)')).join('; ') + '. ' : 'No hay paquetes revisados que dependan de ella. ') +
-      'Retirar no cambia los zips ya exportados.');
+      'Retirar no cambia los zips ya exportados.' + notaInventario(r.inventario_de_paquetes));
     RETIRAR = null; $('#retirar-form').classList.add('oculto'); $('#retirar-motivo').value = ''; await cargarRevisiones();
     ACTUAL = null; $('#visor').classList.add('oculto');
   } catch (err) { mensaje('#retirada-resultado', 'error', err.message); await cargarRevisiones(); }
