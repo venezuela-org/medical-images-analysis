@@ -215,7 +215,7 @@ def test_la_funcion_que_devuelve_solo_la_lista_sigue_existiendo(tmp_path, monkey
     assert app.inventario_de_paquetes(alcance)["completo"] is False   # ...el inventario, sí
 
 
-@pytest.mark.parametrize("defecto", ["vacio", "revision_lista", "sin_pacientes", "sin_pendientes", "sin_revision", "paciente_sin_revision", "revision_sin_identidad", "zip_lista"])
+@pytest.mark.parametrize("defecto", ["vacio", "revision_lista", "sin_pacientes", "sin_pendientes", "sin_revision", "paciente_sin_revision", "revision_sin_identidad", "zip_lista", "revisado_y_pendiente"])
 def test_estructura_incompleta_no_oculta_un_paquete(tmp_path, defecto):
     m = Mesa(tmp_path)
     datos = json.loads(m.manifiesto.read_text())
@@ -227,6 +227,8 @@ def test_estructura_incompleta_no_oculta_un_paquete(tmp_path, defecto):
         datos.pop({"sin_pacientes": "pacientes", "sin_pendientes": "revision_pixeles_pendiente", "sin_revision": "revision_pixeles"}[defecto])
     elif defecto == "paciente_sin_revision":
         datos["revision_pixeles"] = {}
+    elif defecto == "revisado_y_pendiente":
+        datos["revision_pixeles_pendiente"] = [m.pac]
     elif defecto == "revision_sin_identidad":
         datos["revision_pixeles"][m.pac].pop("registro_sha256")
         datos["revision_pixeles"][m.pac].pop("fecha")

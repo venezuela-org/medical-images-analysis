@@ -2241,9 +2241,13 @@ def _manifiesto_valido(m) -> bool:
         r = revision.get(pac)
         if not isinstance(r, dict) or not isinstance(r.get("estado"), str):
             return False
-        if pac not in pendientes:
-            if r["estado"] != "sin_hallazgos" or r.get("vigente") is not True:
-                return False
+        if not isinstance(r.get("vigente"), bool) or r["estado"] not in (
+                "pendiente", "sin_hallazgos", "con_hallazgos", "retirada", "no_verificable"):
+            return False
+        revisado = r["estado"] == "sin_hallazgos" and r["vigente"]
+        if (pac not in pendientes) != revisado:
+            return False  # la lista de pendientes debe concordar con el estado efectivo de cada paciente
+        if revisado:
             huella = r.get("registro_sha256")
             if huella is not None:
                 if not isinstance(huella, str) or re.fullmatch(r"[0-9a-f]{64}", huella) is None:
