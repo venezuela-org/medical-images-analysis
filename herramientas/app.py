@@ -2215,8 +2215,42 @@ def _sha_de(ruta: Path) -> str | None:
 
 
 def _manifiesto_valido(m) -> bool:
-    return (isinstance(m, dict) and isinstance(m.get("pacientes", []), list) and isinstance(m.get("revision_pixeles") or {}, dict)
-            and isinstance(m.get("revision_pixeles_pendiente", []), list) and isinstance(m.get("zip") or {}, dict))
+    """Valida los datos que permiten decidir dependencias, sin inventar campos ausentes."""
+    if not isinstance(m, dict):
+        return False
+    pacientes = m.get("pacientes")
+    pendientes = m.get("revision_pixeles_pendiente")
+    revision = m.get("revision_pixeles")
+    if (not isinstance(pacientes, list) or not pacientes
+            or any(not isinstance(p, str) or not p for p in pacientes)
+            or len(set(pacientes)) != len(pacientes)
+            or not isinstance(pendientes, list)
+            or any(not isinstance(p, str) or p not in pacientes for p in pendientes)
+            or not isinstance(revision, dict)):
+        return False
+    if "zip" in m:
+        z = m["zip"]
+        if not isinstance(z, dict) or any(not isinstance(z.get(k), str) or not z[k]
+                                         for k in ("nombre", "destino", "sha256")):
+            return False
+    if "alcance" in revision:
+        return (isinstance(revision["alcance"], str) and bool(revision["alcance"])
+                and revision.get("estado") in ("pendiente", "sin_hallazgos")
+                and set(pendientes) == (set() if revision["estado"] == "sin_hallazgos" else set(pacientes)))
+    for pac in pacientes:
+        r = revision.get(pac)
+        if not isinstance(r, dict) or not isinstance(r.get("estado"), str):
+            return False
+        if pac not in pendientes:
+            if r["estado"] != "sin_hallazgos" or r.get("vigente") is not True:
+                return False
+            huella = r.get("registro_sha256")
+            if huella is not None:
+                if not isinstance(huella, str) or re.fullmatch(r"[0-9a-f]{64}", huella) is None:
+                    return False
+            elif not isinstance(r.get("fecha"), str) or not r["fecha"]:
+                return False  # compatibilidad con manifiestos anteriores al identificador por hash
+    return True
 
 
 def _leer_manifiesto_local(ruta: Path) -> tuple[dict | None, str | None]:
@@ -2251,7 +2285,7 @@ def inventario_de_paquetes(alcance: list[dict]) -> dict:
 
     Un manifiesto local que no se puede leer no se salta en silencio:
       - se anota en `problemas`, con su motivo;
-      - si el zip sigue en la carpeta de paquetes, la dependencia se averigua con el manifiesto que va dentro del zip;
+      - si el zip sigue en la carpeta de paquetes, se obtiene información del manifiesto del zip, sin dar por verificada su identidad;
       - si no, ese paquete va a `sin_determinar` y el inventario queda marcado como incompleto.
     Devuelve {'afectados', 'completo', 'problemas', 'sin_determinar'}. No lanza: un inventario incompleto no impide retirar."""
     corridas = [a for a in alcance if a["tipo"] == "corrida"]
@@ -2300,6 +2334,9 @@ def inventario_de_paquetes(alcance: list[dict]) -> dict:
                 if zip_por_nombre not in zips_de_corrida and zip_por_nombre not in encontrados:    # el zip de una corrida se conoce por su registro
                     sin_determinar.append({"zip": zip_por_nombre, "ruta": str(zip_local), "existe": zip_local.is_file(), "motivo": f"su manifiesto local {motivo}"})
                 continue
+            if zip_por_nombre not in zips_de_corrida:
+                sin_determinar.append({"zip": zip_por_nombre, "ruta": str(zip_local), "existe": True,
+                                       "motivo": "el manifiesto del zip se pudo leer, pero su identidad original no se puede verificar sin el sha256 registrado al publicar"})
             z = {"nombre": zip_por_nombre, "destino": str(carpeta), "sha256": None}                # el sha256 anotado al publicar no se conoce
         else:
             z = m.get("zip") or {}
@@ -2330,7 +2367,7 @@ def inventario_de_paquetes(alcance: list[dict]) -> dict:
         except OSError:
             mismo = False
         afectados_out.append({**e, "ruta": str(ruta), "existe": existe, "es_el_mismo_archivo": mismo if e["sha256"] else None})
-    sin_determinar = [x for x in sin_determinar if x["zip"] not in encontrados]
+    sin_determinar = [x for x in sin_determinar if not encontrados.get(x["zip"], {}).get("sha256")]
     return {"afectados": sorted(afectados_out, key=lambda e: e["zip"]), "completo": not sin_determinar,
             "problemas": problemas, "sin_determinar": sorted(sin_determinar, key=lambda e: e["zip"])}
 

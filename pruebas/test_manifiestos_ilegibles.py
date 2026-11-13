@@ -3,7 +3,7 @@ Al retirar una revisión, un manifiesto de paquete que no se puede leer no se sa
 When withdrawing a review, an unreadable package manifest is not silently skipped.
 
 La retirada se hace igual. Lo que cambia es lo que se dice de los paquetes: si el zip sigue en la carpeta de paquetes, la
-dependencia se averigua con el manifiesto que va dentro del zip; si no, ese paquete queda como "sin determinar" y la
+información se recupera del manifiesto interno, pero sin identidad original verificable queda "sin determinar" y la
 lista de afectados se marca como incompleta, en la respuesta y en el diario de la retirada.
 """
 from __future__ import annotations
@@ -121,7 +121,7 @@ def test_manifiesto_ilegible_con_el_zip_presente_se_averigua_con_el_manifiesto_d
     assert [e["zip"] for e in afectados] == [m.zip.name]              # y el paquete no se pierde de la lista
     assert afectados[0]["recuperado_del_zip"] is True and afectados[0]["existe"] is True and afectados[0]["ruta"] == str(m.zip)
     inv = r["inventario_de_paquetes"]
-    assert inv["completo"] is True and inv["sin_determinar"] == []
+    assert inv["completo"] is False and [e["zip"] for e in inv["sin_determinar"]] == [m.zip.name]
     assert [(p["manifiesto"], p["recuperado_del_zip"], p["zip_en_paquetes"]) for p in inv["problemas"]] == [(m.manifiesto.name, True, True)]
     assert fragmento in inv["problemas"][0]["motivo"]                 # el manifiesto ilegible se dice, con su motivo
     assert m.diario()["inventario_de_paquetes"] == inv                # y queda en el diario
@@ -185,9 +185,9 @@ def test_si_la_carpeta_de_paquetes_no_se_deja_listar_la_lista_se_marca_incomplet
     m.la_retirada_vale_y_el_zip_no_cambia()
 
 
-def test_el_manifiesto_ilegible_de_un_paquete_ajeno_con_su_zip_no_ensucia_la_lista(tmp_path, monkeypatch):
+def test_el_manifiesto_ilegible_de_un_paquete_ajeno_no_demuestra_identidad(tmp_path, monkeypatch):
     """Un paquete de otra revisión del mismo paciente, hecho antes: su manifiesto local está roto, pero su zip dice que no
-    cita la revisión que se retira. No entra entre los afectados y la lista queda completa."""
+    cita la revisión que se retira. No entra entre los afectados confirmados, pero la lista queda incompleta."""
     m = Mesa(tmp_path)
     app = m.app
     viejo_zip, viejo_manifiesto = m.zip, m.manifiesto                 # paquete hecho con la primera revisión (Ana)
@@ -200,7 +200,7 @@ def test_el_manifiesto_ilegible_de_un_paquete_ajeno_con_su_zip_no_ensucia_la_lis
     r = m.retirar()                                                   # se retira la revisión vigente: la de Miguel
     assert [e["zip"] for e in r["paquetes_afectados"]] == [nuevo.name]
     inv = r["inventario_de_paquetes"]
-    assert inv["completo"] is True and [p["manifiesto"] for p in inv["problemas"]] == [viejo_manifiesto.name]
+    assert inv["completo"] is False and [p["manifiesto"] for p in inv["problemas"]] == [viejo_manifiesto.name]
     assert viejo_zip.name not in [e["zip"] for e in r["paquetes_afectados"]]
 
 
@@ -213,3 +213,55 @@ def test_la_funcion_que_devuelve_solo_la_lista_sigue_existiendo(tmp_path, monkey
     truncar(m, monkeypatch)
     assert app.paquetes_que_dependen_de(alcance) == []                # la lista sola no dice que está incompleta...
     assert app.inventario_de_paquetes(alcance)["completo"] is False   # ...el inventario, sí
+
+
+@pytest.mark.parametrize("defecto", ["vacio", "revision_lista", "sin_pacientes", "sin_pendientes", "sin_revision", "paciente_sin_revision", "revision_sin_identidad", "zip_lista"])
+def test_estructura_incompleta_no_oculta_un_paquete(tmp_path, defecto):
+    m = Mesa(tmp_path)
+    datos = json.loads(m.manifiesto.read_text())
+    if defecto == "vacio":
+        datos = {}
+    elif defecto == "revision_lista":
+        datos["revision_pixeles"] = []
+    elif defecto.startswith("sin_"):
+        datos.pop({"sin_pacientes": "pacientes", "sin_pendientes": "revision_pixeles_pendiente", "sin_revision": "revision_pixeles"}[defecto])
+    elif defecto == "paciente_sin_revision":
+        datos["revision_pixeles"] = {}
+    elif defecto == "revision_sin_identidad":
+        datos["revision_pixeles"][m.pac].pop("registro_sha256")
+        datos["revision_pixeles"][m.pac].pop("fecha")
+    else:
+        datos["zip"] = []
+    m.manifiesto.write_text(json.dumps(datos))
+    assert not m.app._manifiesto_valido(datos)
+    r = m.retirar()
+    inv = r["inventario_de_paquetes"]
+    assert r["estado"] == "completa" and inv["completo"] is False
+    assert inv["problemas"][0]["motivo"] == "su estructura no es válida"
+    assert [e["zip"] for e in inv["sin_determinar"]] == [m.zip.name]
+    assert m.diario()["inventario_de_paquetes"] == inv
+    m.la_retirada_vale_y_el_zip_no_cambia()
+
+
+def test_zip_sustituido_no_demuestra_que_el_original_era_ajeno(tmp_path):
+    m = Mesa(tmp_path)
+    original = m.zip.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(original)) as z:
+        entradas = {n: z.read(n) for n in z.namelist()}
+    manifiesto = json.loads(entradas["manifiesto.json"])
+    manifiesto["revision_pixeles"][m.pac]["registro_sha256"] = "a" * 64
+    entradas["manifiesto.json"] = json.dumps(manifiesto).encode()
+    with zipfile.ZipFile(m.zip, "w") as z:
+        for nombre, datos in entradas.items():
+            z.writestr(nombre, datos)
+    reemplazo = m.zip.read_bytes()
+    assert reemplazo != original
+    m.manifiesto.write_text("{")
+    r = m.retirar()
+    assert r["estado"] == "completa" and r["paquetes_afectados"] == []
+    inv = r["inventario_de_paquetes"]
+    assert inv["completo"] is False
+    assert [e["zip"] for e in inv["sin_determinar"]] == [m.zip.name]
+    assert m.diario()["inventario_de_paquetes"] == inv
+    assert m.app.leer_revision(m.pac)["lista_para_compartir"] is False
+    assert m.zip.read_bytes() == reemplazo

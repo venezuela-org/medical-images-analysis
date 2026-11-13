@@ -52,9 +52,11 @@ El manifiesto de un paquete de Enviar cita la revisión de cada paciente por el 
 
 Para saber qué paquetes dependían de la revisión que se retira, la aplicación lee los manifiestos locales de `datos-pet/paquetes`. Si alguno no se puede leer (sin permiso, contenido que no es JSON, estructura no válida), la retirada se hace igual y se dice qué pasó con ese paquete:
 
-- Si su zip sigue en la carpeta de paquetes, la dependencia se averigua con el manifiesto que va dentro del zip. El paquete aparece en la lista si dependía de la revisión, marcado como "recuperado del zip", y el manifiesto ilegible se anota con su motivo.
+- Si su zip sigue en la carpeta de paquetes, su manifiesto puede indicar una dependencia y el paquete se incluye como "recuperado del zip". Sin el hash original registrado al publicar, no se puede verificar que ese zip no haya sido sustituido: también queda "sin determinar" y el inventario incompleto, incluso si el manifiesto interno cita otra revisión. Un registro de corrida que ya identifica el paquete conserva su evidencia independiente.
 - Si su zip no está allí, o tampoco se puede leer, el paquete queda "sin determinar" y la lista de afectados se marca como incompleta. Hay que tratarlo como afectado hasta comprobarlo.
 - Si la carpeta de paquetes no se deja listar, la lista entera se marca como incompleta.
+
+Se rechazan también los objetos JSON con campos obligatorios ausentes o de tipo incorrecto, incluidas las referencias de revisión incompletas.
 
 El estado de la lista queda en el diario de la retirada, en el campo `inventario_de_paquetes`, y se muestra en Registro.
 
