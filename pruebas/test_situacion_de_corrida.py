@@ -95,20 +95,34 @@ def test_un_dicom_en_cuarentena_no_se_cuenta_como_un_archivo_omitido(app, tmp_pa
     assert next(p for p in t["pasos"] if p["clave"] == "limpieza")["estado"] == "aviso"     # la decisión es la de siempre
 
 
-def test_un_estudio_sin_pet_no_bloquea_y_no_tiene_suv_que_comparar(app, tmp_path):
-    """Una carpeta con solo la serie CT. No hay SUV que comparar y el paquete se crea.
-    Hallazgo conocido, documentado en docs/CAMBIOS.md (0.10.0, fila 45): la aplicación clasifica hoy este caso como par
-    inconsistente, cuando no hay par que comparar. Esta prueba fija lo que no debe cambiar: no bloquea y no inventa un SUV."""
+def test_un_estudio_sin_pet_es_no_evaluable_y_no_un_par_inconsistente(app, tmp_path):
+    """Una carpeta con solo la serie CT: no hay par que comparar. Es 'no evaluable', no bloquea y no hay SUV que comparar."""
     origen = caso(tmp_path)
     for f in origen.rglob("IM*"):
         if str(pydicom.dcmread(f, stop_before_pixels=True).Modality) == "PT":
             f.unlink()
     t = correr(app, origen, tmp_path / "destino")
-    emparejamiento = datos(t, "emparejamiento")
-    assert emparejamiento["estudios"] == 1 and emparejamiento["compatibles"] == 0
-    assert emparejamiento["inconsistentes"] + emparejamiento["no_evaluables"] == 1
+    paso = next(p for p in t["pasos"] if p["clave"] == "emparejamiento")
+    assert paso["datos"] == {"estudios": 1, "compatibles": 0, "inconsistentes": 0, "no_evaluables": 1}
+    assert paso["estado"] == "omitido" and "no evaluable" in paso["resumen"] and "INCONSISTENTE" not in paso["resumen"]
     assert datos(t, "suv") == {"series": 0, "clases": {}}
-    assert t["zip"] and t["estado"] in ("ok", "con avisos")           # no bloquea
+    assert t["zip"] and t["estado"] == "ok"                           # no bloquea, y sin más avisos la corrida termina sin avisos
+
+
+def test_un_par_que_no_se_corresponde_sigue_siendo_inconsistente(app, tmp_path):
+    """El caso contrario: hay CT y PET, pero no ocupan el mismo lugar. Sigue siendo un aviso de par inconsistente."""
+    origen = caso(tmp_path)
+    for f in origen.rglob("IM*"):
+        ds = pydicom.dcmread(f)
+        if str(ds.Modality) == "PT":
+            x_, y_, z_ = [float(v) for v in ds.ImagePositionPatient]
+            ds.ImagePositionPatient = [x_, y_, z_ + 5000.0]            # el PET, cinco metros más allá
+            ds.save_as(f, enforce_file_format=True)
+    t = correr(app, origen, tmp_path / "destino")
+    paso = next(p for p in t["pasos"] if p["clave"] == "emparejamiento")
+    assert paso["datos"]["inconsistentes"] == 1 and paso["datos"]["no_evaluables"] == 0
+    assert paso["estado"] == "aviso" and "PAR INCONSISTENTE" in paso["resumen"]
+    assert t["zip"]                                                   # tampoco bloquea
 
 
 def test_la_clase_del_suv_distingue_no_calculable_de_discrepancia(app):

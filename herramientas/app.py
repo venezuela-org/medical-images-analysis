@@ -1290,9 +1290,9 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
             nombre = f"{d.parent.name}/{d.name}"
             if codigo == 0:
                 textos.append(f"{nombre}: {linea or 'CANDIDATO COMPATIBLE'}"); estados.append("ok"); clases.append("compatible")
-            elif codigo == 1:
-                textos.append(f"{nombre}: PAR INCONSISTENTE: {linea or 'CT y PET no corresponden'}"); estados.append("aviso"); clases.append("inconsistente")
-            else:
+            elif codigo == 1 and linea:                               # hay un par CT + PET y la herramienta lo da por inconsistente
+                textos.append(f"{nombre}: PAR INCONSISTENTE: {linea}"); estados.append("aviso"); clases.append("inconsistente")
+            else:                                                     # sin par que comparar: emparejar sale con 1 y no nombra ningún par
                 textos.append(f"{nombre}: no evaluable (falta CT o PET, o información insuficiente)"); estados.append("omitido"); clases.append("no_evaluable")
         peor = "aviso" if "aviso" in estados else ("ok" if "ok" in estados else "omitido")
         paso("emparejamiento", peor, "; ".join(textos)[:300], "\n".join(textos),
