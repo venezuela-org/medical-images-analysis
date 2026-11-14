@@ -290,3 +290,17 @@ Las versiones 0.8.0 a 0.9.11 no se publicaron; sus cambios y los hallazgos de su
 | 41 | PR #3: paciente revisado también listado como pendiente | La lista de pendientes debe coincidir con el estado efectivo de cada revisión; una contradicción deja el manifiesto no verificable | Caso `revisado_y_pendiente` |
 | 42 | PR #3: el nombre del zip dentro del manifiesto podía apuntar a otro paquete | El lector local exige que el nombre coincida con el derivado del manifiesto; una discrepancia conserva la incertidumbre del paquete original | `test_nombre_de_zip_distinto_no_oculta_el_paquete_original` |
 | 43 | PR #3: manifiesto local sin datos de publicación; inventario antiguo o dañado sin aviso o con error | El manifiesto local exige el bloque zip; los inventarios antiguos o de estructura inválida se muestran como desconocidos, sin impedir la retirada | Regresión de evidencia local, seis variantes de inventario y reapertura de Registro en Chromium |
+
+# Cambios 0.10.0 / Changes 0.10.0
+
+Nueva presentación de la pestaña Rápido. No cambia ninguna decisión del flujo; los cambios del servidor exponen como datos lo que antes solo estaba en frases. Detalle en `docs/notas-de-version/v0.10.0.md`.
+
+En la siguiente tabla se ve cada cambio y cómo se probó.
+
+| # | Qué había / Before | Cambio / Change | Prueba / Test |
+|---|---|---|---|
+| 44 | Un solo aviso mezclaba el fin del proceso, la revisión pendiente y la ruta del zip; seis pasos en verde sobre un botón deshabilitado se leían como "todo bien" | Franja con tres estados independientes y un apartado para cada uno: procesamiento, revisión de píxeles y paquete. `situacion_de_corrida()` los calcula en cada consulta | `pruebas/test_situacion_de_corrida.py`; `prueba_navegador.py`; `prueba_estados.py` |
+| 45 | Hallazgo durante la inspección, sin corregir aquí: una carpeta con solo CT (o solo PET) se muestra como "PAR INCONSISTENTE". `emparejar.py` sale con código 1 cuando no hay nada que emparejar y la aplicación asigna ese código a "inconsistente". No bloquea. Reproducción: caso de demostración sin los archivos PET, modo rápido, paso 4 | Documentado; la corrección va en un cambio aparte | `test_un_estudio_sin_pet_no_bloquea_y_no_tiene_suv_que_comparar` fija que no bloquea |
+| 46 | Las cifras de cada paso solo estaban dentro de frases; los archivos omitidos por no ser DICOM no se veían junto a la limpieza | Cada paso lleva `datos`: cifras y clase del resultado, del reporte de la limpieza y de valores ya calculados | `test_cada_paso_lleva_sus_cifras_y_los_no_dicom_se_cuentan_aparte`, `test_un_dicom_en_cuarentena_no_se_cuenta_como_un_archivo_omitido`, `test_la_clase_del_suv_distingue_no_calculable_de_discrepancia` |
+| 47 | Lo ocurrido al publicar llegaba una sola vez, en la respuesta de la revisión; un intento fallido no dejaba rastro en la pantalla | Se guarda en la corrida (`publicacion`, `publicacion_fallida`) y se vuelve a leer en cada consulta | `test_lo_que_falla_despues_de_publicar_queda_como_accion_pendiente_y_el_paquete_sigue_publicado`, `test_un_intento_de_publicar_que_falla_queda_anotado_y_no_publica` |
+| 48 | Un resumen que se quedaba en pantalla podía seguir diciendo "registrada" tras una retirada | El estado se pide de nuevo al volver a la pestaña o a la ventana y con "Volver a comprobar"; sin respuesta, se marca "sin comprobar" | `test_un_diario_ilegible_deja_la_revision_como_no_verificable_y_vuelve_al_leerse`, `test_si_el_registro_o_el_zip_ya_no_estan_no_se_dan_por_buenos`; `prueba_navegador.py`; `prueba_estados.py` |

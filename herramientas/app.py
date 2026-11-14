@@ -53,6 +53,7 @@ import threading
 import warnings
 import webbrowser
 import zipfile
+from collections import Counter
 from pathlib import Path
 
 warnings.simplefilter("ignore")
@@ -89,7 +90,7 @@ def comando_herramienta(nombre: str) -> list[str]:
 
 ANON = _cargar_anonimizar()
 
-VERSION = "0.9.12"
+VERSION = "0.10.0"
 AQUI = Path(__file__).resolve().parent
 ANONIMIZAR = AQUI / "anonimizar.py"
 SYNC_MARCAS = ("Library/Mobile Documents", "Library/CloudStorage", "OneDrive", "Dropbox", "Google Drive", "My Drive", "iCloud")
@@ -585,6 +586,69 @@ def crear_demo(request: Request):
     return {"ruta": str(destino), "salida": salida.strip()}
 
 
+def situacion_de_corrida(t: dict) -> dict:
+    """Lo que consta AHORA de una corrida del modo rápido, en tres partes que no se mezclan: el procesamiento, la revisión
+    de píxeles y el paquete. Se calcula en cada consulta con lo que hay en el disco (el registro de la revisión, los diarios
+    de retirada, el zip); no es el recuerdo de lo que se mostró al terminar.
+
+    No decide nada. Lee lo que ya decidieron la corrida, el registro de la revisión y las retiradas. Cuando algo no se
+    puede leer, lo dice; nunca lo da por bueno."""
+    pasos = t.get("pasos") or []
+    cuenta = Counter(p_["estado"] for p_ in pasos)
+    procesamiento = {"estado": {"corriendo": "en_curso", "ok": "terminado", "con avisos": "terminado_con_avisos", "error": "detenido"}.get(t.get("estado"), str(t.get("estado"))),
+                     "paso_en_curso": next((i for i, p_ in enumerate(pasos, 1) if p_["estado"] == "corriendo"), None),
+                     "paso_detenido": next((i for i, p_ in enumerate(pasos, 1) if p_["estado"] == "error"), None),
+                     "correctos": cuenta["ok"], "con_aviso": cuenta["aviso"], "no_evaluados": cuenta["omitido"], "total": len(pasos)}
+    base = {"procesamiento": procesamiento, "versiones": t.get("versiones") or {"aplicacion": VERSION, "politica": ANON.POLITICA},
+            "comprobado": dt.datetime.now().isoformat(timespec="seconds")}
+    if not t.get("zip"):
+        return {**base, "revision": {"estado": "sin_paquete"}, "paquete": {"estado": "no_creado"}}
+
+    avance = progreso_corrida(t)
+    revision: dict = {"estado": "pendiente"}
+    retiradas = estado_de_retiradas()
+    if retiradas["bloqueo"]:                                          # no se sabe qué está retirado: nada se da por vigente
+        revision = {"estado": "no_verificable", "problemas": retiradas["problemas"], "habia_registro": bool(t.get("revisado"))}
+    elif t.get("revisado"):
+        canonico = nombre_canonico(Path(str(t.get("registro_revision") or "")).name)
+        ruta = ruta_de_registro_de_corrida(canonico) if REGISTRO_RAPIDO_RE.match(canonico) else None
+        try:
+            datos = ruta.read_bytes() if ruta else None
+            r = json.loads(datos.decode("utf-8")) if datos is not None else None
+        except (OSError, ValueError):
+            datos = r = None
+        if not isinstance(r, dict):
+            revision = {"estado": "registro_no_legible", "registro": canonico or None}
+        else:
+            try:
+                diario = retirada_que_cubre("corrida", canonico, hashlib.sha256(datos).hexdigest())
+            except RetiradasNoVerificables as e:
+                diario, revision = None, {"estado": "no_verificable", "problemas": e.problemas, "habia_registro": True}
+            if revision["estado"] != "no_verificable":
+                revision = {"estado": "retirada" if diario else "registrada", "revisor": r.get("revisor"), "fecha": r.get("fecha"),
+                            "declaracion": "sin_hallazgos", "mostrado": r.get("mostrado"), "registro": canonico, "registro_provisional": ruta.name != canonico}
+                if diario:
+                    revision["retirada"] = diario["retirada"]
+                    revision["inventario_de_paquetes"] = resumen_de_inventario(diario)
+    revision["cuadros_mostrados"], revision["cuadros_totales"] = avance["mostrados"], avance["total"]
+    revision["no_mostrables"] = len(t.get("no_mostrables") or [])
+
+    zip_ruta = Path(str(t["zip"]))
+    try:
+        existe = zip_ruta.is_file()
+    except OSError:
+        existe = None                                                 # no se pudo mirar: ni sí ni no
+    publicacion = t.get("publicacion") or {}
+    pendientes = [{"clase": "evidencia", "texto": a} for a in publicacion.get("avisos_posteriores", [])] + \
+                 [{"clase": "limpieza", "texto": "no se pudo eliminar de la carpeta de trabajo: " + x} for x in publicacion.get("pendiente_anterior_no_eliminado", [])]
+    paquete = {"estado": ("publicado" if t.get("revisado") else "pendiente_local") if existe else ("no_encontrado" if existe is False else "no_comprobable"),
+               "ruta": str(zip_ruta), "existe": existe, "con_revision_registrada": bool(t.get("revisado")),
+               "destino": t.get("destino"), "destino_sincronizado": t.get("destino_sincronizado") or None,
+               "archivos": len(t.get("archivos") or {}), "pacientes": list(t.get("pacientes") or []),
+               "acciones_pendientes": pendientes, "ultimo_intento_fallido": t.get("publicacion_fallida")}
+    return {**base, "revision": revision, "paquete": paquete}
+
+
 @api.get("/trabajo/{tid}")
 def trabajo(request: Request, tid: str):
     auth(request)
@@ -597,6 +661,8 @@ def trabajo(request: Request, tid: str):
         rep = carpeta_reportes() / "ultimo_reporte.md"
         t["reporte"] = rep.read_text(encoding="utf-8") if rep.exists() else ""
     out = {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida", "servidos", "mostrados")}
+    if t.get("nombre") == "rapido" and t.get("pasos"):
+        out["situacion"] = situacion_de_corrida(t)
     if t.get("nombre") == "rapido" and t.get("zip"):
         out["progreso"] = progreso_corrida(t)
         ahora = estado_de_retiradas()                                 # el estado de ahora, no el de cuando terminó la corrida
@@ -1082,31 +1148,59 @@ def validar_destino(destino: Path, origen: Path) -> Path:
     return d
 
 
-def clasificar_suv(codigo: int, informe: dict, salida: str) -> tuple[str, str]:
-    """(estado, etiqueta): distingue una discrepancia real de 'no se puede calcular' y de un problema de orden."""
+def clasificar_suv_con_clase(codigo: int, informe: dict, salida: str) -> tuple[str, str, str]:
+    """(estado, etiqueta, clase): distingue una discrepancia real de 'no se puede calcular' y de un problema de orden.
+    La clase es el mismo veredicto como dato, para que la pantalla no tenga que leerlo en una frase:
+    identico, discrepancia, no_calculable, correspondencia_incompleta, orden_incoherente o sin_veredicto."""
     if codigo == 0 and informe.get("veredicto") == "IDENTICO":
-        return "ok", "IDENTICO"
+        return "ok", "IDENTICO", "identico"
     if informe.get("voxeles_distintos", 0) or informe.get("factores_identicos") is False or informe.get("intervalos_identicos") is False:
-        return "error", f"DISCREPANCIA: {informe.get('voxeles_distintos', 0)} vóxeles distintos entre original y limpio"
+        return "error", f"DISCREPANCIA: {informe.get('voxeles_distintos', 0)} vóxeles distintos entre original y limpio", "discrepancia"
     textos = " ".join(informe.get("detalles", []) + informe.get("problemas_de_correspondencia", [])) + salida
     if "no calculable" in textos or "SUVbw no calculable" in textos:
         motivo = next((d.split("no calculable:")[-1].strip() for d in informe.get("detalles", []) if "no calculable" in d), "faltan atributos")
-        return "aviso", f"no se puede calcular el SUV ({motivo}); no es una discrepancia"
+        return "aviso", f"no se puede calcular el SUV ({motivo}); no es una discrepancia", "no_calculable"
     if informe.get("correspondencia_completa") is False:
-        return "aviso", "correspondencia incompleta entre original y limpio: " + "; ".join(informe.get("problemas_de_correspondencia", []))[:120]
+        return "aviso", "correspondencia incompleta entre original y limpio: " + "; ".join(informe.get("problemas_de_correspondencia", []))[:120], "correspondencia_incompleta"
     if informe.get("orden_y_geometria_ok") is False:
-        return "aviso", "orden o geometría incoherentes en la serie: " + "; ".join(informe.get("problemas_de_orden_y_geometria", []))[:120]
-    return "aviso", "sin veredicto"
+        return "aviso", "orden o geometría incoherentes en la serie: " + "; ".join(informe.get("problemas_de_orden_y_geometria", []))[:120], "orden_incoherente"
+    return "aviso", "sin veredicto", "sin_veredicto"
+
+
+def clasificar_suv(codigo: int, informe: dict, salida: str) -> tuple[str, str]:
+    """(estado, etiqueta), como siempre. La clase la da clasificar_suv_con_clase()."""
+    return clasificar_suv_con_clase(codigo, informe, salida)[:2]
+
+
+def datos_de_limpieza(rels: list[str]) -> dict:
+    """Las cifras de la limpieza que acaba de terminar, tomadas de su reporte (no de sus frases): cuántos archivos se
+    leyeron, cuántos entran en esta corrida, cuántos se omitieron por no ser imágenes DICOM y cuántos DICOM quedaron en
+    cuarentena, con sus motivos. Solo recuentos y motivos genéricos; ningún nombre de archivo."""
+    try:
+        r = json.loads((carpeta_reportes() / "ultimo_reporte.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        r = {}
+    entero = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
+    omitidos = {str(k): v for k, v in (r.get("archivos_omitidos") or {}).items() if isinstance(v, int)} if isinstance(r.get("archivos_omitidos"), dict) else {}
+    cuarentena = r.get("cuarentena") if isinstance(r.get("cuarentena"), list) else None
+    motivos = Counter(str(c.get("motivo") or "sin motivo anotado") for c in (cuarentena or []) if isinstance(c, dict))
+    return {"leidos": entero(r.get("archivos_leidos")), "en_la_corrida": len(rels), "escritos": entero(r.get("archivos_escritos")),
+            "ya_guardados": entero(r.get("duplicados_omitidos")), "actualizados": entero(r.get("actualizados_version")),
+            "omitidos": omitidos, "omitidos_total": sum(omitidos.values()) if isinstance(r.get("archivos_omitidos"), dict) else None,
+            "cuarentena_total": len(cuarentena) if cuarentena is not None else None, "cuarentena_motivos": dict(motivos),
+            "pacientes": len({x.split("/")[0] for x in rels})}
 
 
 def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
     t = TRABAJOS[tid]
-    pasos = {c: {"clave": c, "titulo": titulo, "estado": "pendiente", "resumen": "", "salida": ""} for c, titulo in PASOS_RAPIDO}
+    pasos = {c: {"clave": c, "titulo": titulo, "estado": "pendiente", "resumen": "", "salida": "", "datos": {}} for c, titulo in PASOS_RAPIDO}
     t["pasos"] = [pasos[c] for c, _ in PASOS_RAPIDO]
+    t["versiones"] = {"aplicacion": VERSION, "politica": ANON.POLITICA}
     limpios = (TRABAJO / "limpios").resolve()
 
-    def paso(clave: str, estado: str, resumen: str = "", salida: str = "") -> None:
-        pasos[clave].update(estado=estado, resumen=resumen, salida=salida[-6000:])
+    def paso(clave: str, estado: str, resumen: str = "", salida: str = "", datos: dict | None = None) -> None:
+        """`datos` son las cifras y la clase del resultado, para la pantalla. No deciden nada: la decisión es `estado`."""
+        pasos[clave].update(estado=estado, resumen=resumen, salida=salida[-6000:], datos=datos or {})
 
     restos_temporales: list[str] = []
 
@@ -1143,7 +1237,7 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         if codigo not in (0, 1) or rels is None:
             paso("limpieza", "error", "la limpieza no terminó", salida)
             return terminar("error", "La limpieza falló; no se creó ningún zip.")
-        paso("limpieza", "ok" if codigo == 0 else "aviso", listo or "limpieza terminada", salida)
+        paso("limpieza", "ok" if codigo == 0 else "aviso", listo or "limpieza terminada", salida, datos_de_limpieza(rels))
         indexar()
         archivos = [limpios / r_ for r_ in rels]
         if not rels or not all(a.is_file() for a in archivos):
@@ -1162,9 +1256,9 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
                 fallos[rel] = problemas
         if fallos:
             paso("compuerta", "error", f"{len(fallos)} archivo(s) con problemas en los metadatos",
-                 "\n".join(f"{r_}: {'; '.join(ps)}" for r_, ps in list(fallos.items())[:30]))
+                 "\n".join(f"{r_}: {'; '.join(ps)}" for r_, ps in list(fallos.items())[:30]), {"comprobados": len(rels), "con_problemas": len(fallos)})
             return terminar("error", "La compuerta de metadatos falló; no se creó ningún zip.")
-        paso("compuerta", "ok", f"metadatos en regla en los {len(rels)} archivos de esta carpeta")
+        paso("compuerta", "ok", f"metadatos en regla en los {len(rels)} archivos de esta carpeta", datos={"comprobados": len(rels), "con_problemas": 0})
 
         # 3. cotejo, sobre el conjunto exacto de esta corrida: cada original presente debe llegar a uno de estos archivos,
         #    cada uno de estos archivos debe venir de un original presente y coincidir byte a byte. Los archivos guardados
@@ -1177,39 +1271,41 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         veredicto = next((l for l in salida.splitlines() if l.startswith("Veredicto")), "")
         iguales = next((l.strip() for l in salida.splitlines() if "coinciden byte a byte" in l), "")
         if codigo != 0:
-            paso("cotejo", "error", veredicto or "el cotejo no terminó", salida)
+            paso("cotejo", "error", veredicto or "el cotejo no terminó", salida, {"clase": "no_coincide", "esperados": entradas_aceptadas})
             return terminar("error", "La copia limpia no coincide con la limpieza recalculada; no se creó ningún zip.")
         n_cotejados = int(m.group(1)) if (m := re.search(r"coinciden byte a byte:\s*(\d+)", salida)) else -1
         if n_cotejados != entradas_aceptadas:
-            paso("cotejo", "error", f"el cotejo cubrió {n_cotejados} archivo(s) y la limpieza de esta corrida aceptó {entradas_aceptadas}", salida)
+            paso("cotejo", "error", f"el cotejo cubrió {n_cotejados} archivo(s) y la limpieza de esta corrida aceptó {entradas_aceptadas}", salida,
+                 {"clase": "conjunto_distinto", "coinciden": max(n_cotejados, 0), "esperados": entradas_aceptadas})
             return terminar("error", "El cotejo y la limpieza no cubren el mismo conjunto de archivos; no se creó ningún zip.")
-        paso("cotejo", "ok", f"{veredicto}; {iguales}".strip("; "), salida)
+        paso("cotejo", "ok", f"{veredicto}; {iguales}".strip("; "), salida, {"clase": "coincide", "coinciden": n_cotejados, "esperados": entradas_aceptadas})
 
         # 4. emparejamiento por estudio de esta corrida (informa; no bloquea)
         paso("emparejamiento", "corriendo")
         estudios_dir = sorted({a.parents[1] for a in archivos})
-        textos, estados = [], []
+        textos, estados, clases = [], [], []
         for d in estudios_dir:
             codigo, salida = ejecutar(comando_herramienta("emparejar") + [str(d), "--solo-lista", str(lista_corrida)])
             linea = next((l.strip() for l in salida.splitlines() if " + PET " in l), "")
             nombre = f"{d.parent.name}/{d.name}"
             if codigo == 0:
-                textos.append(f"{nombre}: {linea or 'CANDIDATO COMPATIBLE'}"); estados.append("ok")
+                textos.append(f"{nombre}: {linea or 'CANDIDATO COMPATIBLE'}"); estados.append("ok"); clases.append("compatible")
             elif codigo == 1:
-                textos.append(f"{nombre}: PAR INCONSISTENTE: {linea or 'CT y PET no corresponden'}"); estados.append("aviso")
+                textos.append(f"{nombre}: PAR INCONSISTENTE: {linea or 'CT y PET no corresponden'}"); estados.append("aviso"); clases.append("inconsistente")
             else:
-                textos.append(f"{nombre}: no evaluable (falta CT o PET, o información insuficiente)"); estados.append("omitido")
+                textos.append(f"{nombre}: no evaluable (falta CT o PET, o información insuficiente)"); estados.append("omitido"); clases.append("no_evaluable")
         peor = "aviso" if "aviso" in estados else ("ok" if "ok" in estados else "omitido")
-        paso("emparejamiento", peor, "; ".join(textos)[:300], "\n".join(textos))
+        paso("emparejamiento", peor, "; ".join(textos)[:300], "\n".join(textos),
+             {"estudios": len(clases), "compatibles": clases.count("compatible"), "inconsistentes": clases.count("inconsistente"), "no_evaluables": clases.count("no_evaluable")})
 
         # 5. SUV original / limpio por serie PET de esta corrida
         paso("suv", "corriendo")
         series_dir = {str(a.parent.resolve()) for a in archivos}
         series_pt = [s_ for s_ in INDICE.values() if s_["modalidad"] == "PT" and str(Path(s_["cortes"][0][1]).parent.resolve()) in series_dir]
         if not series_pt:
-            paso("suv", "omitido", "no hay series PET en esta carpeta")
+            paso("suv", "omitido", "no hay series PET en esta carpeta", datos={"series": 0, "clases": {}})
         else:
-            textos, estados = [], []
+            textos, estados, clases = [], [], []
             for s_ in series_pt:
                 fd, tmpj = tempfile.mkstemp(suffix=".json")
                 os.close(fd)
@@ -1222,12 +1318,13 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
                         informe = {}
                 finally:
                     Path(tmpj).unlink(missing_ok=True)
-                estado_s, etiqueta = clasificar_suv(codigo, informe, salida)
-                textos.append(f"{s_['paciente']} {s_['serie']}: {etiqueta}"); estados.append(estado_s)
+                estado_s, etiqueta, clase = clasificar_suv_con_clase(codigo, informe, salida)
+                textos.append(f"{s_['paciente']} {s_['serie']}: {etiqueta}"); estados.append(estado_s); clases.append(clase)
+            datos_suv = {"series": len(clases), "clases": dict(Counter(clases))}
             if "error" in estados:
-                paso("suv", "error", "; ".join(textos)[:300], "\n".join(textos))
+                paso("suv", "error", "; ".join(textos)[:300], "\n".join(textos), datos_suv)
                 return terminar("error", "El SUV calculado sobre la copia limpia difiere del original; no se creó ningún zip.")
-            paso("suv", "aviso" if "aviso" in estados else "ok", "; ".join(textos)[:300], "\n".join(textos))
+            paso("suv", "aviso" if "aviso" in estados else "ok", "; ".join(textos)[:300], "\n".join(textos), datos_suv)
 
         # 6. paquete: exactamente estos archivos, con la revisión pendiente, en la carpeta de trabajo local.
         #    La correspondencia de nombres exportados se calcula UNA vez, sobre los archivos de esta corrida, y se congela:
@@ -1243,7 +1340,7 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
             r = crear_paquete(pacientes, TRABAJO / "paquetes", solo=set(rels), exportacion=exportacion, orden_series=orden_series,
                               demografia=t["demografia"], revision_corrida={"estado": "pendiente", "detalle": "revisión de píxeles de esta corrida sin registrar"})
         except PaqueteRechazado as e:
-            paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000])
+            paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000], {"clase": "no_creado"})
             return terminar("error", "El paquete no se creó." + texto_restos(e.cuerpo.get("restos", [])))
         t["zip"], t["archivos"] = r["ruta"], r["hashes"]
         t["retiradas_no_verificables"] = r.get("retiradas_no_verificables", [])
@@ -1264,7 +1361,10 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
                           "esta corrida no se podrá registrar hasta que ese diario se pueda leer; el zip queda pendiente, en local.") if t["retiradas_no_verificables"] else ""
         paso("paquete", "aviso" if sin_verificar or t.get("no_mostrables") or t["retiradas_no_verificables"] else "ok",
              f"{r['archivos']} archivos de esta carpeta ({', '.join(pacientes)}), en la carpeta de trabajo, numerados por serie.{extra}{nota_orden}{nota_cuadros}{nota_visor}{nota_retiradas}",
-             r["ruta"] + "\n" + "\n".join(f"{serie}: {o['criterio']}" + (f" ({o['aviso']})" if o["aviso"] else "") for serie, o in sorted(orden_series.items())))
+             r["ruta"] + "\n" + "\n".join(f"{serie}: {o['criterio']}" + (f" ({o['aviso']})" if o["aviso"] else "") for serie, o in sorted(orden_series.items())),
+             {"clase": "creado", "archivos": r["archivos"], "series": len(orden_series), "pacientes": len(pacientes),
+              "orden_no_verificado": len(sin_verificar), "orden_por_posicion": len(por_posicion), "con_varios_cuadros": varios_cuadros,
+              "no_mostrables": len(t.get("no_mostrables") or []), "de_importaciones_anteriores": sum(t["otros_archivos_del_paciente"].values())})
         hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
         terminar("con avisos" if hay_avisos else "ok",
                  "Zip creado en la carpeta de trabajo con la revisión de píxeles pendiente. Pasará al destino elegido cuando registres la revisión.")
@@ -1594,6 +1694,10 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         no_eliminados = [str(v) for v in (anterior, anterior.with_name(anterior.name[:-4] + ".manifiesto.json"))
                          if v.resolve() != Path(r["ruta"]).resolve() and not _eliminar(v)]
         hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
+        # Lo ocurrido al publicar se guarda en la corrida: la pantalla lo vuelve a leer en cada consulta, no solo una vez.
+        t["publicacion"] = {"fecha": revision["fecha"], "registro_confirmado": registro_confirmado, "avisos_posteriores": list(avisos_posteriores),
+                            "pendiente_anterior_no_eliminado": list(no_eliminados), "revision_de_paciente_actualizada": list(cubiertos)}
+        t.pop("publicacion_fallida", None)
         t["mensaje"] = "Zip revisado y guardado en el destino." + (" Hay avisos en los pasos de arriba." if hay_avisos else "")
         registrar(f"rápido: revisión registrada por {revisor}; zip en el destino; pacientes con revisión completa: {', '.join(cubiertos) or 'ninguno'}"
                   + (f"; avisos posteriores: {len(avisos_posteriores) + len(no_eliminados)}" if avisos_posteriores or no_eliminados else ""))
@@ -1610,11 +1714,14 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
 def rapido_revision(request: Request, cuerpo: dict):
     """Tras recorrer todos los cortes: registra la revisión de la corrida y escribe el zip revisado en el destino."""
     auth(request)
+    t = TRABAJOS.get(str(cuerpo.get("trabajo", "")))
     try:
-        return aplicar_revision_rapido(TRABAJOS.get(str(cuerpo.get("trabajo", ""))), str(cuerpo.get("revisor", "")).strip()[:120])
+        return aplicar_revision_rapido(t, str(cuerpo.get("revisor", "")).strip()[:120])
     except RevisionBloqueada as e:
         return JSONResponse(status_code=409, content=e.cuerpo())
     except PublicacionFallida as e:
+        if t is not None:                                             # el intento fallido queda a la vista hasta que uno salga bien
+            t["publicacion_fallida"] = {"fecha": dt.datetime.now().isoformat(timespec="seconds"), "detalle": e.mensaje, "restos": list(e.restos)}
         return JSONResponse(status_code=e.codigo, content={"detail": e.mensaje, "restos": e.restos})
 
 
@@ -2799,38 +2906,69 @@ HTML = """<!doctype html>
 <header class="marca">
   <svg class="icono" viewBox="0 0 26 26" aria-hidden="true"><rect x="2" y="2" width="15" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="9" y="9" width="15" height="15" rx="3" fill="var(--acento)" fill-opacity=".18" stroke="var(--acento)" stroke-width="1.8"/><circle cx="16.5" cy="16.5" r="2.2" fill="var(--acento)"/></svg>
   <span class="nombre">PET/CT local</span>
-  <span class="lema">anonimizar · revisar · enviar · todo en 127.0.0.1</span>
+  <span class="lema">anonimizar · revisar · enviar</span>
+  <span class="local" title="La aplicación lee tus estudios y escribe sus resultados en esta computadora"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="11.5" rx="1.8"/><path d="M8.5 20h7M12 16v4"/></svg>Procesamiento local</span>
   <span class="version" id="version"></span>
 </header>
 <nav class="pestanas"><button data-tab="rapido" title="Una carpeta, de principio a fin, con un solo botón"><span class="paso">»</span>Rápido</button><button data-tab="entrada" class="activa"><span class="paso">1</span>Entrada</button><button data-tab="estudios"><span class="paso">2</span>Estudios</button><button data-tab="enviar"><span class="paso">3</span>Enviar</button><button data-tab="registro"><span class="paso">·</span>Registro</button></nav>
 <main>
 <section id="rapido" class="pestana">
   <h2>Anonimizar una carpeta, de principio a fin</h2>
-  <p class="suave">Un solo botón: limpia la carpeta, comprueba los metadatos, coteja con el original, empareja CT y PET, compara el SUV y deja un zip donde tú digas. Mirar las imágenes sigue siendo tarea de una persona: el zip nace con la revisión de píxeles pendiente y se queda en la carpeta de trabajo; cuando registres la revisión de esta corrida, pasa al destino que elijas.</p>
-  <div class="fila"><input type="text" id="rap-origen" placeholder="Carpeta del estudio, en el disco local"><button id="btn-rap-origen">Elegir carpeta…</button></div>
-  <div class="fila"><input type="text" id="rap-destino" placeholder="Dónde guardar el zip ya revisado"><button id="btn-rap-destino">Elegir destino…</button></div>
-  <div class="fila"><button id="btn-rapido" class="primario">Anonimizar carpeta</button><span id="rap-reloj" class="terciario"></span></div>
-  <div id="rap-estado"></div>
-  <div id="rap-pasos" class="pasos"></div>
-  <div id="rap-revision" class="oculto">
-    <div class="fila"><input type="text" id="rap-revisor" placeholder="quien revisa" class="corto"><button id="btn-rap-revision">Revisé todos los cortes: sin hallazgos</button></div>
-    <p class="terciario">Recorre aquí abajo todos los cortes de todas las series antes de registrar: el botón se habilita cuando todos han estado en pantalla en este navegador. Que un corte se haya mostrado no significa que esté revisado: la revisión es tu declaración. Vale para los archivos exactos de esta corrida: si alguno cambia, hay que repetirla. Al registrar, el zip revisado se escribe en el destino y el pendiente se elimina de la carpeta de trabajo.</p>
+  <p class="suave frase">Un botón encadena seis comprobaciones y deja un zip en esta computadora. Mirar las imágenes sigue siendo tarea de una persona: el zip sale al destino cuando alguien declara, con su nombre, que las revisó.</p>
+  <div class="rap-formulario">
+    <div class="campo"><label for="rap-origen">Carpeta del estudio</label><div class="fila"><input type="text" id="rap-origen" placeholder="Carpeta del estudio, en el disco local"><button id="btn-rap-origen">Elegir carpeta...</button></div></div>
+    <div class="campo"><label for="rap-destino">Destino del zip revisado</label><div class="fila"><input type="text" id="rap-destino" placeholder="Dónde guardar el zip ya revisado"><button id="btn-rap-destino">Elegir destino...</button></div></div>
+    <div class="fila accion"><button id="btn-rapido" class="primario">Anonimizar carpeta</button><span id="rap-reloj" class="terciario" aria-live="polite"></span></div>
   </div>
-  <div id="rap-visor" class="oculto">
-    <h3>Los archivos de este paquete, en su orden</h3>
-    <p class="terciario">Son exactamente los archivos del zip de esta corrida, con la numeración de sus nombres. Importaciones posteriores no cambian esta lista. La pestaña Estudios muestra todo lo guardado del paciente, que puede ser más.</p>
-    <div class="fila" id="rap-series"></div>
-    <p id="rap-etiqueta-estudio" class="etiqueta-estudio"></p><div id="rap-aviso-demografia"></div>
-    <div class="visor-corrida"><div class="lienzo"><img id="rap-corte" alt="corte de la corrida"></div>
-      <div><input type="range" id="rap-deslizador" min="1" max="1" value="1">
-        <div id="rap-cuadros" class="oculto"><label class="terciario" for="rap-cuadro">Cuadros de este archivo</label><input type="range" id="rap-cuadro" min="1" max="1" value="1"></div>
-        <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label></div>
-        <p id="rap-etiqueta" class="mono"></p>
-        <div class="fila"><button id="btn-rap-recorrer">Recorrer la serie</button></div>
-        <p id="rap-progreso" class="terciario"></p>
-        <div id="rap-orden"></div></div></div>
+  <div id="rap-estado" aria-live="polite"></div>
+  <div id="rap-franja" class="franja oculto" role="group" aria-label="Estado de la corrida, en tres partes">
+    <div id="rap-f-proceso"><span class="que">Procesamiento</span><span class="como"></span><span class="detalle"></span></div>
+    <div id="rap-f-revision"><span class="que">Revisión de píxeles</span><span class="como"></span><span class="detalle"></span></div>
+    <div id="rap-f-paquete"><span class="que">Paquete</span><span class="como"></span><span class="detalle"></span></div>
   </div>
-  <details id="rap-detalles" class="oculto"><summary>Salida de cada paso</summary><pre id="rap-salida" class="salida"></pre></details>
+  <div id="rap-area-resumen" class="area oculto">
+    <h3>Resumen de la corrida</h3>
+    <p class="suave frase">Lo que consta de esta corrida, en tres partes. Es una lectura de los registros de la aplicación; el manifiesto del zip y los registros de revisión siguen siendo la fuente.</p>
+    <div id="rap-resumen" class="resumen"></div>
+    <div class="fila"><button id="btn-rap-copiar">Copiar resumen</button><button id="btn-rap-comprobar">Volver a comprobar</button><span id="rap-comprobado" class="terciario" aria-live="polite"></span></div>
+    <textarea id="rap-copia" class="oculto" rows="8" readonly aria-label="Resumen de la corrida, para copiar"></textarea>
+    <p class="terciario">El resumen copiado lleva estados, cifras y versiones. Deja fuera rutas, nombres de archivo, la etiqueta del estudio y el nombre de quien revisó. Describe registros de la aplicación; el permiso para compartir los datos lo da tu institución.</p>
+  </div>
+  <div id="rap-area-proceso" class="area oculto">
+    <h3>Procesamiento</h3>
+    <p id="rap-proceso-frase" class="suave frase"></p>
+    <div id="rap-pasos" class="libro"></div>
+  </div>
+  <div id="rap-area-revision" class="area oculto">
+    <h3>Revisión de píxeles</h3>
+    <p id="rap-revision-frase" class="suave frase"></p>
+    <div id="rap-revision-aviso"></div>
+    <div id="rap-visor" class="oculto">
+      <h4 id="rap-visor-titulo">Las imágenes de este paquete, en su orden</h4>
+      <p class="terciario">Son exactamente los archivos del zip de esta corrida, con la numeración de sus nombres. Importaciones posteriores no cambian esta lista. La pestaña Estudios muestra todo lo guardado del paciente, que puede ser más.</p>
+      <div class="visor-corrida"><div><p id="rap-etiqueta-estudio" class="etiqueta-estudio"></p><div id="rap-aviso-demografia"></div><div class="lienzo"><img id="rap-corte" alt="corte de la corrida"></div>
+          <input type="range" id="rap-deslizador" min="1" max="1" value="1" aria-label="Corte de la serie">
+          <div id="rap-cuadros" class="oculto"><label class="terciario" for="rap-cuadro">Cuadros de este archivo</label><input type="range" id="rap-cuadro" min="1" max="1" value="1"></div>
+          <p id="rap-etiqueta" class="mono"></p></div>
+        <div><div id="rap-series" class="series" role="group" aria-label="Series del paquete"></div>
+          <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><button id="btn-rap-recorrer">Recorrer la serie</button></div>
+          <div class="mostrados"><p id="rap-progreso"></p><span class="barra"><i id="rap-barra"></i></span>
+            <p class="terciario">Un cuadro mostrado es un cuadro que estuvo en pantalla. Que alguien lo haya examinado es lo que declara quien firma.</p></div>
+          <div id="rap-orden"></div></div></div>
+    </div>
+    <div id="rap-revision" class="declarar oculto">
+      <h4>Declaración de quien revisa</h4>
+      <div class="fila"><label for="rap-revisor" class="terciario">Tu nombre</label><input type="text" id="rap-revisor" placeholder="quien revisa" class="corto"><button id="btn-rap-revision" class="primario">Revisé todos los cortes: sin hallazgos</button></div>
+      <p id="rap-porque" class="terciario" aria-live="polite"></p>
+      <p class="terciario">Vale para los archivos exactos de esta corrida: si alguno cambia, hay que repetirla. Al registrar, el zip revisado se escribe en el destino y el pendiente se elimina de la carpeta de trabajo. Si encuentras texto grabado o un rostro, no declares: anótalo como hallazgo en la pestaña Estudios.</p>
+    </div>
+  </div>
+  <div id="rap-area-paquete" class="area oculto">
+    <h3>Paquete</h3>
+    <p id="rap-paquete-frase" class="suave frase"></p>
+    <dl id="rap-paquete-ficha" class="ficha"></dl>
+    <div id="rap-paquete-avisos"></div>
+  </div>
 </section>
 <section id="entrada" class="pestana activa">
   <h2>Carpeta con los DICOM originales</h2>
@@ -2992,33 +3130,344 @@ function recorrido(boton, img, avanzar) {
   boton.onclick = () => { if (activo) return parar(); activo = true; boton.textContent = 'Detener'; setTimeout(paso, 300); };
   return parar;
 }
-let RAPIDO = null, BLOQUEO_REVISION = false, AVANCE_CORRIDA = null;
-const ETIQUETA_PASO = {pendiente: ['neutro', '· pendiente'], corriendo: ['info', '… en curso'], ok: ['ok', '✓ correcto'], aviso: ['aviso', '! aviso'], error: ['error', '× falló'], omitido: ['neutro', '– omitido']};
+let RAPIDO = null, BLOQUEO_REVISION = false, AVANCE_CORRIDA = null, ULTIMA = null, COMPROBADO = null;
+const ABIERTOS = new Set();
+// ---- piezas pequeñas: iconos en línea (ningún recurso externo), elementos y plurales ----
+const TRAZOS = {
+  ok: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.8"/>',
+  aviso: '<path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.2v.3"/>',
+  error: '<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>',
+  curso: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  espera: '<circle cx="12" cy="12" r="9" stroke-dasharray="3 3.4"/>',
+  omitido: '<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  paquete: '<path d="M3.5 8 12 3.5 20.5 8v8L12 20.5 3.5 16z"/><path d="M3.5 8 12 12.5 20.5 8M12 12.5v8"/>',
+};
+function icono(nombre) {
+  const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('class', 'ico'); s.setAttribute('aria-hidden', 'true');
+  s.innerHTML = TRAZOS[nombre] || TRAZOS.espera; return s;
+}
+const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = String(txt); return e; };
+const plural = (n, uno, varios) => n + ' ' + (n === 1 ? uno : varios);
+const fechaLegible = iso => { const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(iso || ''); return m ? m[3] + '/' + m[2] + '/' + m[1] + ', ' + m[4] + ':' + m[5] : (iso || ''); };
+// Un aviso que responde a tres preguntas: qué pasó, a qué afecta y qué se puede hacer. Las acciones son las que la aplicación tiene.
+function cajaAviso(tipo, titulo, filas, acciones) {
+  const caja = el('div', 'caja-aviso ' + tipo); caja.setAttribute('role', tipo === 'error' ? 'alert' : 'status');
+  const cab = el('div', 'caja-titulo'); cab.appendChild(icono(tipo === 'error' ? 'error' : 'aviso')); cab.appendChild(el('strong', null, titulo)); caja.appendChild(cab);
+  const dl = el('dl');
+  for (const [dt, dd] of filas) { if (!dd) continue; dl.appendChild(el('dt', null, dt)); const d = el('dd'); if (dd instanceof Node) d.appendChild(dd); else d.textContent = dd; dl.appendChild(d); }
+  caja.appendChild(dl);
+  if (acciones && acciones.length) { const f = el('div', 'fila'); for (const [rotulo, alPulsar, cls] of acciones) { const b = el('button', cls || '', rotulo); b.onclick = alPulsar; f.appendChild(b); } caja.appendChild(f); }
+  return caja;
+}
+const irARegistro = () => document.querySelector('nav button[data-tab=registro]').click();
+
+// ---- los seis pasos: nombre, estado con icono y texto, una frase, la cifra cuando el servidor la da, y el detalle ----
+const ESTADO_PASO = {pendiente: ['espera', 'neutro', 'En espera'], corriendo: ['curso', 'activo', 'En curso'], ok: ['ok', 'ok', 'Correcto'],
+  aviso: ['aviso', 'aviso', 'Aviso'], error: ['error', 'error', 'Detenido aquí'], omitido: ['omitido', 'neutro', 'No evaluado']};
+const QUE_COMPRUEBA = {
+  limpieza: 'Lee cada archivo de la carpeta, quita nombres, fechas e identificadores y guarda la copia limpia. Los archivos que no son imágenes DICOM se omiten. Un DICOM que no se puede limpiar con seguridad se aparta en cuarentena y queda fuera del paquete.',
+  compuerta: 'Vuelve a leer cada archivo limpio de esta corrida y comprueba que sus etiquetas cumplen la política de anonimización.',
+  cotejo: 'Repite la limpieza de cada original y compara el resultado, byte a byte, con la copia limpia guardada. Cubre exactamente los archivos de esta corrida.',
+  emparejamiento: 'Comprueba si la serie CT y la serie PET de cada estudio se corresponden. Informa; el paquete se crea en cualquier caso.',
+  suv: 'Calcula el SUV de cada serie PET con el original y con la copia limpia, y compara los dos. Una diferencia real detiene el proceso. Que falten datos para calcularlo es un aviso.',
+  paquete: 'Reúne los archivos limpios de esta corrida en un zip, numerados por corte, con su manifiesto. El zip nace con la revisión de píxeles pendiente y se queda en la carpeta de trabajo.',
+};
+const HACIENDO = {
+  limpieza: 'Leyendo y anonimizando los archivos de la carpeta.', compuerta: 'Comprobando las etiquetas de cada archivo limpio.',
+  cotejo: 'Repitiendo la limpieza de cada archivo y comparándola con la copia guardada.', emparejamiento: 'Comparando la serie CT con la serie PET de cada estudio.',
+  suv: 'Calculando el SUV con el original y con la copia limpia.', paquete: 'Escribiendo y verificando el zip.',
+};
+function detenidoAntes(t, i) { const k = (t.pasos || []).findIndex(x => x.estado === 'error'); return k >= 0 && i > k; }
+function frasePaso(t, p, i) {
+  const d = p.datos || {}, e = p.estado, c = p.clave;
+  if (e === 'pendiente') return 'Empieza cuando termine el paso anterior.';
+  if (e === 'corriendo') return HACIENDO[c] || 'En curso.';
+  if (e === 'omitido' && detenidoAntes(t, i)) return 'No se ejecutó: el proceso se detuvo antes.';
+  if (c === 'limpieza' && e !== 'error' && d.en_la_corrida != null) {
+    let s = plural(d.en_la_corrida, 'archivo anonimizado', 'archivos anonimizados') + ', de ' + plural(d.pacientes, 'paciente', 'pacientes') + '.';
+    if (d.omitidos_total) s += ' ' + plural(d.omitidos_total, 'archivo no es una imagen DICOM y se omitió', 'archivos no son imágenes DICOM y se omitieron') + '.';
+    if (d.cuarentena_total) s += ' ' + plural(d.cuarentena_total, 'DICOM quedó en cuarentena, fuera del paquete', 'DICOM quedaron en cuarentena, fuera del paquete') + '.';
+    else if (d.cuarentena_total === 0) s += ' Ninguno en cuarentena.';
+    return s;
+  }
+  if (c === 'compuerta' && e === 'ok' && d.comprobados != null) return 'Los ' + plural(d.comprobados, 'archivo limpio pasa', 'archivos limpios pasan') + ' la comprobación de etiquetas.';
+  if (c === 'compuerta' && e === 'error' && d.con_problemas != null) return plural(d.con_problemas, 'archivo limpio tiene', 'archivos limpios tienen') + ' etiquetas que la política no admite. No se creó ningún zip.';
+  if (c === 'cotejo' && e === 'ok' && d.coinciden != null) return 'Al repetir la limpieza, ' + (d.coinciden === 1 ? 'el archivo coincide' : 'los ' + d.coinciden + ' coinciden') + ' byte a byte.';
+  if (c === 'cotejo' && e === 'error') return (d.clase === 'conjunto_distinto' ? 'El cotejo y la limpieza no cubren los mismos archivos.' : 'La copia limpia no coincide con la limpieza repetida.') + ' No se creó ningún zip.';
+  if (c === 'emparejamiento' && d.estudios != null) {
+    const partes = [];
+    if (d.compatibles) partes.push(plural(d.compatibles, 'estudio con CT y PET compatibles', 'estudios con CT y PET compatibles'));
+    if (d.inconsistentes) partes.push(plural(d.inconsistentes, 'estudio en el que CT y PET no se corresponden', 'estudios en los que CT y PET no se corresponden'));
+    if (d.no_evaluables) partes.push(plural(d.no_evaluables, 'estudio que no se pudo evaluar', 'estudios que no se pudieron evaluar') + ' (falta CT o PET, o información)');
+    return partes.join('; ') + '.' + (e !== 'ok' ? ' El paquete se crea igual.' : '');
+  }
+  if (c === 'suv' && d.series === 0) return 'No hay series PET en esta carpeta; no hay SUV que comparar.';
+  if (c === 'suv' && d.clases) {
+    const k = d.clases, partes = [];
+    if (k.identico) partes.push(plural(k.identico, 'serie PET con valores idénticos', 'series PET con valores idénticos') + ' antes y después de limpiar');
+    if (k.discrepancia) partes.push(plural(k.discrepancia, 'serie PET cuyo SUV difiere', 'series PET cuyo SUV difiere') + ' entre el original y la copia limpia');
+    if (k.no_calculable) partes.push(plural(k.no_calculable, 'serie PET en la que no se puede calcular el SUV', 'series PET en las que no se puede calcular el SUV') + ' porque faltan datos');
+    const otras = (k.correspondencia_incompleta || 0) + (k.orden_incoherente || 0) + (k.sin_veredicto || 0);
+    if (otras) partes.push(plural(otras, 'serie PET cuya comparación no se pudo completar', 'series PET cuya comparación no se pudo completar'));
+    return partes.join('; ') + '.' + (e === 'error' ? ' No se creó ningún zip.' : (e === 'aviso' ? ' No es una discrepancia; el paquete se crea igual.' : ''));
+  }
+  if (c === 'paquete' && d.clase === 'creado') {
+    let s = 'Zip creado con ' + plural(d.archivos, 'archivo', 'archivos') + ' en ' + plural(d.series, 'serie', 'series') + ', numerados por corte.';
+    if (d.orden_no_verificado) s += ' En ' + plural(d.orden_no_verificado, 'serie', 'series') + ' el orden de los cortes no se pudo verificar.';
+    if (d.no_mostrables) s += ' ' + plural(d.no_mostrables, 'imagen no se puede', 'imágenes no se pueden') + ' mostrar en el visor.';
+    return s;
+  }
+  return p.resumen || '';                                           // sin datos: la frase del servidor, tal cual
+}
+function cifraPaso(p) {
+  const d = p.datos || {}, c = p.clave;
+  if (p.estado === 'pendiente' || p.estado === 'corriendo') return null;
+  if (c === 'limpieza' && d.en_la_corrida != null && d.leidos != null) return [d.en_la_corrida, 'de ' + d.leidos + ' leídos'];
+  if (c === 'compuerta' && d.comprobados != null) return [d.comprobados - (d.con_problemas || 0), 'de ' + d.comprobados];
+  if (c === 'cotejo' && d.coinciden != null && d.esperados != null) return [d.coinciden, 'de ' + d.esperados];
+  if (c === 'emparejamiento' && d.estudios != null) return [d.compatibles, 'de ' + plural(d.estudios, 'estudio', 'estudios')];
+  if (c === 'suv' && d.series) return [(d.clases || {}).identico || 0, 'de ' + plural(d.series, 'serie PET', 'series PET')];
+  if (c === 'paquete' && d.archivos != null) return [d.archivos, d.archivos === 1 ? 'archivo' : 'archivos'];
+  return null;
+}
+function siguientePaso(t, p, i) {
+  const d = p.datos || {}, e = p.estado, c = p.clave, k = d.clases || {};
+  if (e === 'omitido' && detenidoAntes(t, i)) return 'Este paso se ejecutará cuando el proceso llegue hasta él. Corrige lo que detuvo el paso anterior y vuelve a pulsar Anonimizar carpeta.';
+  if (c === 'limpieza' && e === 'error') return 'No se creó ningún zip. Si la carpeta no contiene imágenes CT, PET o MR, no hay nada que anonimizar; en otro caso, la salida del paso dice dónde se detuvo.';
+  if (c === 'limpieza' && d.cuarentena_total) return 'Los DICOM en cuarentena son imágenes del estudio que quedan fuera del paquete; no son lo mismo que los archivos omitidos, que no eran imágenes. El reporte de la carpeta limpios_REPORTES dice el motivo de cada uno, sin valores.';
+  if (c === 'compuerta' && e === 'error') return 'No se creó ningún zip. La salida del paso dice qué archivo y qué etiqueta; envíala a quien mantiene la aplicación. Los archivos limpios se quedan en esta computadora.';
+  if (c === 'cotejo' && e === 'error') return 'No se creó ningún zip. Vuelve a ejecutar el modo rápido sobre la carpeta; si se repite, envía la salida del paso a quien mantiene la aplicación.';
+  if (c === 'emparejamiento' && d.inconsistentes) return 'Es un aviso y no detiene el proceso. Tenlo en cuenta si vas a usar las dos series juntas: la salida del paso dice en qué difieren.';
+  if (c === 'emparejamiento' && d.no_evaluables) return 'No indica un error en los archivos: falta una de las dos series, o los datos para compararlas. No detiene el proceso.';
+  if (c === 'suv' && k.discrepancia) return 'No se creó ningún zip. La diferencia está en la cuantificación de esa serie; el emparejamiento CT + PET es otra comprobación y no la explica. Envía la salida del paso a quien mantiene la aplicación.';
+  if (c === 'suv' && k.no_calculable) return 'A los archivos les faltan datos para calcular el SUV (por ejemplo peso, dosis u horas), tanto en el original como en la copia limpia. No es una diferencia entre los dos y no detiene el proceso.';
+  if (c === 'suv' && e === 'aviso') return 'La comparación no se pudo completar; no se ha encontrado una diferencia de valores. La salida del paso dice el motivo.';
+  if (c === 'paquete' && e === 'error') return 'El paquete no se creó. La salida del paso dice el motivo y, si quedó algún archivo intermedio, su ruta.';
+  if (c === 'paquete' && d.orden_no_verificado) return 'Los metadatos de esas series no permiten verificar el orden; se usó un desempate fijo. Compruébalo en el visor al revisar.';
+  return '';
+}
+const ROTULOS_DATOS = {
+  limpieza: [['leidos', 'Archivos leídos en la carpeta'], ['en_la_corrida', 'Archivos limpios de esta corrida'], ['escritos', 'Escritos ahora'], ['ya_guardados', 'Ya guardados, verificados'],
+             ['actualizados', 'Actualizados de una versión anterior'], ['omitidos_total', 'Omitidos por no ser imágenes DICOM'], ['cuarentena_total', 'DICOM apartados en cuarentena']],
+  compuerta: [['comprobados', 'Archivos comprobados'], ['con_problemas', 'Con etiquetas no admitidas']],
+  cotejo: [['coinciden', 'Coinciden byte a byte'], ['esperados', 'Archivos de esta corrida']],
+  emparejamiento: [['estudios', 'Estudios'], ['compatibles', 'CT y PET compatibles'], ['inconsistentes', 'CT y PET no se corresponden'], ['no_evaluables', 'No evaluables']],
+  suv: [['series', 'Series PET']],
+  paquete: [['archivos', 'Archivos en el zip'], ['series', 'Series'], ['pacientes', 'Pacientes'], ['orden_no_verificado', 'Series con orden no verificado'],
+            ['orden_por_posicion', 'Series ordenadas por posición'], ['con_varios_cuadros', 'Archivos con varios cuadros'], ['no_mostrables', 'Imágenes que el visor no puede mostrar'],
+            ['de_importaciones_anteriores', 'Archivos del paciente de importaciones anteriores, fuera de este zip']],
+};
+const CLASES_SUV = {identico: 'Valores idénticos', discrepancia: 'Con diferencia real', no_calculable: 'No calculable (faltan datos)', correspondencia_incompleta: 'Correspondencia incompleta',
+  orden_incoherente: 'Orden o geometría incoherentes', sin_veredicto: 'Sin veredicto'};
+function detallePaso(t, p, i) {
+  const caja = el('div', 'paso-detalle'), d = p.datos || {};
+  caja.appendChild(el('p', null, QUE_COMPRUEBA[p.clave] || ''));
+  const filas = (ROTULOS_DATOS[p.clave] || []).filter(([k]) => d[k] != null).map(([k, r]) => [r, d[k]]);
+  if (p.clave === 'suv') for (const [k, n] of Object.entries(d.clases || {})) filas.push([CLASES_SUV[k] || k, n]);
+  if (p.clave === 'limpieza') for (const [k, n] of Object.entries(d.cuarentena_motivos || {})) filas.push(['En cuarentena: ' + k, n]);
+  if (filas.length) { const dl = el('dl', 'cifras'); for (const [r, v] of filas) { dl.appendChild(el('dt', null, r)); dl.appendChild(el('dd', null, v)); } caja.appendChild(dl); }
+  const sig = siguientePaso(t, p, i); if (sig) { const q = el('p', 'siguiente'); q.appendChild(el('strong', null, 'Qué significa y qué puedes hacer. ')); q.appendChild(document.createTextNode(sig)); caja.appendChild(q); }
+  if (p.salida) { const det = el('details', 'salida-paso'); det.appendChild(el('summary', null, 'Salida completa del paso')); det.appendChild(el('pre', 'salida', p.salida)); caja.appendChild(det); }
+  return caja;
+}
 function pintarPasos(t) {
   const cont = $('#rap-pasos'); cont.textContent = '';
-  for (const paso of (t.pasos || [])) {
-    const fila = document.createElement('div'); fila.className = 'paso-fila';
-    const nombre = document.createElement('span'); nombre.className = 'paso-nombre'; nombre.textContent = paso.titulo;
-    const [tipo, txt] = ETIQUETA_PASO[paso.estado] || ETIQUETA_PASO.pendiente;
-    const resumen = document.createElement('span'); resumen.className = 'paso-resumen'; resumen.textContent = paso.resumen || '';
-    fila.appendChild(nombre); fila.appendChild(insignia(tipo, txt)); fila.appendChild(resumen); cont.appendChild(fila);
-  }
-  const salida = (t.pasos || []).filter(x => x.salida).map(x => '== ' + x.titulo + ' ==\n' + x.salida).join('\n\n');
-  $('#rap-detalles').classList.toggle('oculto', !salida); texto('#rap-salida', salida);
+  (t.pasos || []).forEach((p, i) => {
+    let [ico, cls, txt] = ESTADO_PASO[p.estado] || ESTADO_PASO.pendiente;
+    if (p.estado === 'omitido' && detenidoAntes(t, i)) txt = 'No ejecutado';
+    const fila = el('details', 'paso-fila ' + cls + (p.estado === 'corriendo' ? ' en-curso' : '')); fila.dataset.clave = p.clave; fila.dataset.estado = p.estado;
+    if (ABIERTOS.has(p.clave)) fila.open = true;
+    fila.addEventListener('toggle', () => { if (fila.open) ABIERTOS.add(p.clave); else ABIERTOS.delete(p.clave); });
+    const cab = el('summary');
+    cab.appendChild(el('span', 'paso-num', i + 1)); cab.appendChild(el('span', 'paso-nombre', p.titulo));
+    const est = el('span', 'paso-estado ' + cls); est.appendChild(icono(ico)); est.appendChild(el('span', null, txt)); cab.appendChild(est);
+    cab.appendChild(el('span', 'paso-resumen', frasePaso(t, p, i)));
+    const cifra = cifraPaso(p), cc = el('span', 'paso-cifra'); if (cifra) { cc.appendChild(el('b', null, cifra[0])); cc.appendChild(el('small', null, cifra[1])); } cab.appendChild(cc);
+    fila.appendChild(cab); fila.appendChild(detallePaso(t, p, i)); cont.appendChild(fila);
+  });
 }
-function pintarResultadoRapido(t) {
-  if (t.estado === 'error') { mensaje('#rap-estado', 'error', t.mensaje || 'No se creó ningún zip.'); $('#rap-revision').classList.add('oculto'); return; }
-  const nube = t.destino_sincronizado ? ' Ese destino está sincronizado con la nube (' + t.destino_sincronizado + '): el zip solo llegará allí ya revisado.' : '';
+
+// ---- tres estados que no se mezclan: procesamiento, revisión de píxeles, paquete ----
+function celdaFranja(sel, cls, ico, como, detalle) {
+  const c = $(sel); c.className = cls; const k = c.querySelector('.como'); k.textContent = ''; k.appendChild(icono(ico)); k.appendChild(el('span', null, como)); c.querySelector('.detalle').textContent = detalle || '';
+}
+function estadoProceso(t, s) {
+  const p = s.procesamiento, pasos = t.pasos || [];
+  if (p.estado === 'en_curso') return ['activo', 'curso', 'En curso, paso ' + (p.paso_en_curso || 1) + ' de ' + p.total, p.paso_en_curso ? 'Ahora: ' + pasos[p.paso_en_curso - 1].titulo.toLowerCase() + '.' : ''];
+  if (p.estado === 'detenido') return ['error', 'error', 'Detenido en el paso ' + (p.paso_detenido || '?'), (p.paso_detenido ? pasos[p.paso_detenido - 1].titulo + '. ' : '') + 'No se creó ningún zip.'];
+  const cuenta = p.correctos + ' de ' + p.total + ' comprobaciones correctas' + (p.con_aviso ? ', ' + p.con_aviso + ' con aviso' : '') + (p.no_evaluados ? ', ' + p.no_evaluados + ' sin evaluar' : '') + '.';
+  return p.estado === 'terminado' && !p.no_evaluados ? ['ok', 'ok', 'Terminado', cuenta] : ['aviso', 'aviso', p.con_aviso ? 'Terminado con avisos' : 'Terminado', cuenta];
+}
+function estadoRevision(s) {
+  const r = s.revision, m = r.cuadros_mostrados + ' de ' + r.cuadros_totales + ' cuadros mostrados.';
+  if (r.estado === 'sin_paquete') return ['neutro', 'espera', 'Todavía no', s.procesamiento.estado === 'detenido' ? 'No hay paquete que revisar.' : 'Se abre cuando exista el paquete de esta corrida.'];
+  if (r.estado === 'pendiente') return ['aviso', 'aviso', 'Pendiente', m + ' Nadie ha declarado la revisión.'];
+  if (r.estado === 'registrada') return ['ok', 'ok', 'Registrada', 'Declarada por ' + r.revisor + ' el ' + fechaLegible(r.fecha) + '.'];
+  if (r.estado === 'retirada') return ['aviso', 'aviso', 'Retirada', 'Por ' + r.retirada.quien + ' el ' + fechaLegible(r.retirada.fecha) + '.'];
+  if (r.estado === 'no_verificable') return ['error', 'error', r.habia_registro ? 'No verificable' : 'No se puede registrar', 'El estado de las retiradas no se puede verificar.'];
+  return ['error', 'error', 'No verificable', 'El registro de la revisión no se puede leer.'];
+}
+function estadoPaquete(s) {
+  const q = s.paquete, r = s.revision;
+  if (q.estado === 'no_creado') return s.procesamiento.estado === 'detenido' ? ['error', 'error', 'No se creó', 'El proceso se detuvo antes de crearlo.'] : ['neutro', 'espera', 'Todavía no existe', 'Se crea en el paso 6, en esta computadora.'];
+  if (q.estado === 'no_encontrado') return ['aviso', 'aviso', 'No está donde se dejó', 'El zip ya no está en la carpeta en la que la aplicación lo escribió.'];
+  if (q.estado === 'no_comprobable') return ['error', 'error', 'No se pudo comprobar', 'No se pudo mirar la carpeta del zip.'];
+  if (q.estado === 'pendiente_local') return q.ultimo_intento_fallido ? ['error', 'paquete', 'Creado, sin publicar', 'El último intento de publicarlo falló. Sigue en esta computadora.']
+    : ['aviso', 'paquete', 'Creado, sin publicar', 'Está en esta computadora. Aún no ha llegado al destino.'];
+  if (r.estado === 'retirada') return ['aviso', 'paquete', 'Publicado; revisión retirada', 'El zip sigue en el destino y ya no debe compartirse.'];
+  if (r.estado !== 'registrada') return ['aviso', 'paquete', 'Publicado; revisión sin verificar', 'El zip está en el destino, pero su revisión no se puede verificar ahora.'];
+  return q.acciones_pendientes.length ? ['aviso', 'paquete', 'Publicado, con avisos', 'El zip revisado está en el destino. Queda algo por atender.'] : ['ok', 'paquete', 'Publicado en el destino', 'El zip revisado está en la carpeta que elegiste.'];
+}
+function fichaDe(sel, filas) {
+  const dl = $(sel); dl.textContent = '';
+  for (const [dt, dd, cls] of filas) { if (dd == null || dd === '') continue; dl.appendChild(el('dt', null, dt)); dl.appendChild(el('dd', cls || null, dd)); }
+}
+function pintarAreaRevision(t, s) {
+  const r = s.revision, zona = $('#rap-revision-aviso'); zona.textContent = '';
+  const hayPaquete = r.estado !== 'sin_paquete';
+  $('#rap-area-revision').classList.toggle('oculto', !hayPaquete); if (!hayPaquete) return;
+  const frases = {
+    pendiente: 'Pendiente. Falta que una persona recorra todas las series buscando texto grabado en la imagen o un rostro reconocible, y que lo declare con su nombre.',
+    registrada: 'Registrada. ' + (r.revisor || '') + ' declaró el ' + fechaLegible(r.fecha) + ' que revisó todos los cortes, sin hallazgos. Este registro deja constancia de esa declaración; el permiso para compartir los datos lo da tu institución.',
+    retirada: 'Retirada. La declaración que había ya no vale en la aplicación.',
+    no_verificable: 'No se puede saber ahora si la revisión de esta corrida vale.',
+    registro_no_legible: 'El registro de la revisión de esta corrida no se puede leer, así que no se da por vigente.',
+  };
+  texto('#rap-revision-frase', frases[r.estado] || '');
+  if (r.estado === 'no_verificable') {
+    const lista = el('span'); (r.problemas || []).forEach((x, j) => { if (j) lista.appendChild(document.createTextNode('; ')); lista.appendChild(el('span', 'mono', x.diario)); lista.appendChild(document.createTextNode(' (' + x.motivo + ')')); });
+    zona.appendChild(cajaAviso('error', 'No se puede verificar el estado de las retiradas', [
+      ['Qué pasó', (r.problemas || []).length ? (() => { const w = el('span'); w.appendChild(document.createTextNode('Un diario de retiradas no se puede leer: ')); w.appendChild(lista); w.appendChild(document.createTextNode('.')); return w; })() : 'El estado de las retiradas no se pudo leer.'],
+      ['A qué afecta', 'Mientras ese diario no se lea, la aplicación no sabe qué revisiones están retiradas. Por eso no registra revisiones nuevas ni publica paquetes revisados' + (r.habia_registro ? ', y la revisión que esta corrida tenía no se da por vigente' : '') + '. El zip de esta corrida no cambia.'],
+      ['Qué puedes hacer', 'Devuelve el permiso de lectura a ese archivo, o cierra el programa que lo tenga abierto, y vuelve a comprobar. Ningún registro se ha tocado: al leerse el diario, todo sigue donde estaba.'],
+    ], [['Volver a comprobar', comprobarCorrida, 'primario'], ['Abrir Registro', irARegistro]]));
+  }
+  if (r.estado === 'registro_no_legible') zona.appendChild(cajaAviso('error', 'No se puede leer el registro de la revisión', [
+    ['Qué pasó', 'El archivo del registro' + (r.registro ? ' ' + r.registro : '') + ' no está o no se puede leer.'],
+    ['A qué afecta', 'Sin ese registro la aplicación no puede decir que esta corrida esté revisada. El zip publicado no cambia.'],
+    ['Qué puedes hacer', 'Mira en Registro si la revisión aparece allí y vuelve a comprobar. Si el archivo se perdió, ejecuta de nuevo el modo rápido sobre la carpeta y revisa.'],
+  ], [['Volver a comprobar', comprobarCorrida, 'primario'], ['Abrir Registro', irARegistro]]));
+  if (r.estado === 'retirada') {
+    const inv = r.inventario_de_paquetes || {};
+    zona.appendChild(cajaAviso('aviso', 'La revisión de esta corrida se retiró', [
+      ['Qué pasó', r.retirada.quien + ' la retiró el ' + fechaLegible(r.retirada.fecha) + '. Motivo: ' + r.retirada.motivo],
+      ['A qué afecta', 'El zip publicado sigue en su carpeta, sin cambios, y ya no debe compartirse. El registro original se conserva.' + (inv.completo === false || inv.completo == null ? ' La lista de paquetes afectados puede estar incompleta: mírala en Registro.' : '')],
+      ['Qué puedes hacer', 'Para tener de nuevo un paquete revisado, vuelve a pulsar Anonimizar carpeta sobre la misma carpeta y revisa las imágenes.'],
+    ], [['Abrir Registro', irARegistro]]));
+  }
   const ciegos = t.no_mostrables || [];
-  const sinVerificar = t.retiradas_no_verificables || [];
-  const notaRetiradas = sinVerificar.length && !t.revisado ? ' No se puede verificar el estado de las retiradas (' + sinVerificar.map(x => x.diario + ': ' + x.motivo).join('; ') + '): la revisión de esta corrida no se puede registrar hasta que ese diario se pueda leer. El zip sigue pendiente, en la carpeta de trabajo.' : '';
-  const notaCiegos = ciegos.length ? ' ' + ciegos.length + ' imagen(es) no se pueden mostrar en el visor (' + ciegos[0].archivo + ': ' + ciegos[0].motivo + '): la revisión de píxeles de esta corrida no se puede registrar aquí.' : '';
-  if (!t.revisado) mensaje('#rap-estado', 'aviso', (t.mensaje || '') + ' Zip pendiente: ' + t.zip + '. Destino tras la revisión: ' + t.destino + '.' + nube + notaCiegos + notaRetiradas);
-  else mensaje('#rap-estado', t.estado === 'con avisos' ? 'aviso' : 'ok', (t.mensaje || '') + ' Zip: ' + t.zip);
-  $('#rap-revision').classList.toggle('oculto', !(t.zip && !t.revisado));
-  BLOQUEO_REVISION = ciegos.length > 0;
-  if (t.revision_retirada) mensaje('#rap-estado', 'aviso', 'La revisión de esta corrida se retiró el ' + t.revision_retirada.fecha + ' por ' + t.revision_retirada.quien + ': ' + t.revision_retirada.motivo + '. El zip ' + t.zip + ' ya no debe compartirse.');
+  if (ciegos.length && r.estado === 'pendiente') zona.appendChild(cajaAviso('error', plural(ciegos.length, 'imagen no se puede', 'imágenes no se pueden') + ' mostrar en el visor', [
+    ['Qué pasó', 'El visor no sabe dibujar ' + (ciegos.length === 1 ? 'esta imagen' : 'estas imágenes') + ' (' + ciegos[0].motivo + ').'],
+    ['A qué afecta', 'Lo que no se ha podido ver no se puede dar por revisado: la revisión de esta corrida no se puede registrar aquí. El zip queda pendiente, en la carpeta de trabajo.'],
+    ['Qué puedes hacer', 'Anota el caso y consúltalo con quien mantiene la aplicación. Los demás cortes se pueden ver con normalidad.'],
+  ]));
+  BLOQUEO_REVISION = ciegos.length > 0 || r.estado === 'no_verificable';
+  $('#rap-revision').classList.toggle('oculto', !(r.estado === 'pendiente' || (r.estado === 'no_verificable' && !r.habia_registro)));
+  $('#rap-visor-titulo').textContent = r.estado === 'registrada' ? 'Las imágenes de este paquete' : 'Las imágenes de este paquete, en su orden';
+}
+function pintarAreaPaquete(t, s) {
+  const q = s.paquete, r = s.revision, zona = $('#rap-paquete-avisos'); zona.textContent = '';
+  const visible = q.estado !== 'no_creado'; $('#rap-area-paquete').classList.toggle('oculto', !visible); if (!visible) return;
+  const [cls, ico, como] = estadoPaquete(s);
+  const frase = q.estado === 'pendiente_local' ? 'El zip existe y está completo, con la revisión marcada como pendiente en su manifiesto. Se queda en la carpeta de trabajo hasta que se registre la revisión.'
+    : q.estado === 'publicado' ? (r.estado === 'registrada' ? 'El zip con la revisión registrada está en la carpeta de destino.' : 'El zip está en la carpeta de destino; lee el estado de su revisión antes de compartirlo.')
+    : q.estado === 'no_encontrado' ? 'La aplicación escribió el zip, pero ya no lo encuentra en esa carpeta. Puede haberse movido o borrado.' : 'No se pudo comprobar si el zip sigue en su carpeta.';
+  texto('#rap-paquete-frase', frase);
+  const estadoEl = el('span', 'paso-estado ' + cls); estadoEl.appendChild(icono(ico)); estadoEl.appendChild(el('span', null, como));
+  const dl = $('#rap-paquete-ficha'); dl.textContent = '';
+  const fila = (dt, dd) => { dl.appendChild(el('dt', null, dt)); const d = el('dd'); if (dd instanceof Node) d.appendChild(dd); else d.textContent = dd; dl.appendChild(d); };
+  fila('Estado', estadoEl);
+  fila('Contenido', plural(q.archivos, 'archivo DICOM', 'archivos DICOM') + ', numerados por corte, y su manifiesto');
+  fila(q.estado === 'pendiente_local' ? 'Dónde está ahora' : 'Ubicación', el('span', 'mono', q.ruta));
+  if (q.estado === 'pendiente_local') { const w = el('span'); w.appendChild(el('span', 'mono', q.destino || '')); w.appendChild(el('span', 'suave', ' · al registrar la revisión')); fila('Adónde irá', w); }
+  if (q.destino_sincronizado) zona.appendChild(cajaAviso('aviso', 'El destino está sincronizado con la nube', [
+    ['Qué pasó', 'La carpeta de destino pertenece a ' + q.destino_sincronizado + '.'],
+    ['A qué afecta', 'Lo que se escriba allí puede subirse solo. La aplicación solo escribe en ese destino el zip ya revisado.'],
+    ['Qué puedes hacer', 'Si prefieres decidir tú cuándo sale, elige un destino en el disco local antes de registrar la revisión.']]));
+  if (q.ultimo_intento_fallido && q.estado === 'pendiente_local') zona.appendChild(cajaAviso('error', 'El zip revisado no se publicó', [
+    ['Qué pasó', q.ultimo_intento_fallido.detalle],
+    ['A qué afecta', 'En el destino no se escribió ningún zip y la revisión no quedó registrada. El zip pendiente sigue en la carpeta de trabajo.'],
+    ['Qué puedes hacer', (q.ultimo_intento_fallido.restos || []).length ? 'Borra a mano los archivos intermedios que se indican y vuelve a registrar la revisión.' : 'Corrige la causa y vuelve a registrar la revisión.']]));
+  if (q.acciones_pendientes.length) { const ul = el('ul'); for (const a of q.acciones_pendientes) ul.appendChild(el('li', null, a.texto));
+    zona.appendChild(cajaAviso('aviso', 'El zip está publicado; queda algo por atender', [
+      ['Qué pasó', ul], ['A qué afecta', 'El zip publicado y su revisión valen. Lo pendiente es de orden: un nombre provisional, o un archivo de trabajo que no se pudo borrar.'],
+      ['Qué puedes hacer', 'Borra a mano los archivos que se indican. Un registro con nombre provisional se confirma solo al volver a abrir la aplicación o desde Registro.']], [['Abrir Registro', irARegistro]])); }
+}
+function columnaResumen(titulo, cls, ico, filas) {
+  const c = el('div'); const h = el('h4', cls); h.appendChild(icono(ico)); h.appendChild(el('span', null, titulo)); c.appendChild(h);
+  const dl = el('dl'); for (const [dt, dd, k] of filas) { if (dd == null || dd === '') continue; dl.appendChild(el('dt', null, dt)); dl.appendChild(el('dd', k || null, dd)); } c.appendChild(dl); return c;
+}
+function pintarResumen(t, s) {
+  const terminado = s.procesamiento.estado !== 'en_curso';
+  $('#rap-area-resumen').classList.toggle('oculto', !terminado); if (!terminado) return;
+  const cont = $('#rap-resumen'); cont.textContent = '';
+  const limp = ((t.pasos || []).find(x => x.clave === 'limpieza') || {}).datos || {}, r = s.revision, q = s.paquete;
+  const [pc, pi, pt, pd] = estadoProceso(t, s), [rc, ri, rt] = estadoRevision(s), [qc, qi, qt] = estadoPaquete(s);
+  cont.appendChild(columnaResumen('Procesamiento', pc, pi, [
+    ['Estado', pt + '. ' + pd],
+    ['Versiones', 'PET-CT local ' + s.versiones.aplicacion + ' · política ' + s.versiones.politica],
+    ['Alcance de la corrida', limp.leidos != null ? plural(limp.leidos, 'archivo leído', 'archivos leídos') + ' en la carpeta elegida' : 'La carpeta elegida'],
+    ['Incluidos', limp.en_la_corrida != null ? plural(limp.en_la_corrida, 'DICOM', 'DICOM') + ', de ' + plural(limp.pacientes, 'paciente', 'pacientes') : null],
+    ['Omitidos', limp.omitidos_total != null ? plural(limp.omitidos_total, 'archivo que no es', 'archivos que no son') + ' DICOM' : null],
+    ['En cuarentena', limp.cuarentena_total != null ? limp.cuarentena_total + ' DICOM' : null],
+  ]));
+  const mostrados = r.mostrado ? r.mostrado.cuadros_mostrados + ' de ' + r.mostrado.cuadros_totales : (r.cuadros_totales != null ? r.cuadros_mostrados + ' de ' + r.cuadros_totales : null);
+  cont.appendChild(columnaResumen('Revisión de píxeles', rc, ri, [
+    ['Estado, comprobado ahora', {sin_paquete: 'No hay paquete que revisar', pendiente: 'Pendiente: nadie la ha declarado', registrada: 'Registrada y vigente', retirada: 'Retirada', no_verificable: 'No se puede verificar', registro_no_legible: 'Registro ilegible: no se da por vigente'}[r.estado]],
+    ['Declaración', r.estado === 'registrada' || r.estado === 'retirada' ? '«Revisé todos los cortes: sin hallazgos»' : null],
+    ['Quién y cuándo', r.revisor ? r.revisor + ' · ' + fechaLegible(r.fecha) : null],
+    ['Retirada', r.retirada ? r.retirada.quien + ' · ' + fechaLegible(r.retirada.fecha) + ' · ' + r.retirada.motivo : null],
+    [r.mostrado ? 'Cuadros mostrados antes de declarar' : 'Cuadros mostrados en este navegador', mostrados ? mostrados + (r.mostrado ? ', en el navegador' : '') : null],
+    ['Estudio', ((t.demografia || [])[0] || {}).etiqueta || null],
+  ]));
+  cont.appendChild(columnaResumen('Paquete', qc, qi, [
+    ['Estado', q.estado === 'no_creado' ? 'No se creó ningún paquete' : qt],
+    ['Contenido', q.archivos ? plural(q.archivos, 'archivo DICOM', 'archivos DICOM') + ' y su manifiesto' : null],
+    ['Ubicación', q.ruta || null, 'mono'],
+    ['Acciones pendientes', q.estado === 'no_creado' ? null : (q.acciones_pendientes.length ? plural(q.acciones_pendientes.length, 'pendiente', 'pendientes') + ': mira el apartado Paquete' : (q.estado === 'publicado' ? 'Ninguna' : 'Registrar la revisión de píxeles'))],
+  ]));
+  texto('#rap-comprobado', COMPROBADO ? 'Comprobado a las ' + COMPROBADO.toLocaleTimeString('es', {hour: '2-digit', minute: '2-digit', second: '2-digit'}) + '.' : '');
+}
+// El texto que se copia sale de una lista cerrada de campos: estados, cifras y versiones. Ni rutas, ni nombres de archivo,
+// ni el nombre de quien revisó, ni la etiqueta del estudio, ni la salida de los pasos.
+function textoResumen(t, s) {
+  const limp = ((t.pasos || []).find(x => x.clave === 'limpieza') || {}).datos || {}, r = s.revision, q = s.paquete, n = v => v == null ? 'sin dato' : v;
+  const lineas = ['PET-CT local ' + s.versiones.aplicacion + ' · política ' + s.versiones.politica, '',
+    'Procesamiento: ' + estadoProceso(t, s)[2] + '. ' + estadoProceso(t, s)[3],
+    '  Archivos leídos: ' + n(limp.leidos) + ' · en la corrida: ' + n(limp.en_la_corrida) + ' · omitidos por no ser DICOM: ' + n(limp.omitidos_total) + ' · DICOM en cuarentena: ' + n(limp.cuarentena_total)];
+  (t.pasos || []).forEach((p, i) => { let txt = (ESTADO_PASO[p.estado] || ESTADO_PASO.pendiente)[2]; if (p.estado === 'omitido' && detenidoAntes(t, i)) txt = 'No ejecutado'; const c = cifraPaso(p); lineas.push('  ' + (i + 1) + '. ' + p.titulo + ': ' + txt + (c ? ' (' + c[0] + ' ' + c[1] + ')' : '')); });
+  lineas.push('', 'Revisión de píxeles: ' + estadoRevision(s)[2] + '.' + (r.fecha ? ' Fecha de la declaración: ' + fechaLegible(r.fecha) + '.' : '') + (r.retirada ? ' Retirada el ' + fechaLegible(r.retirada.fecha) + '.' : ''));
+  if (r.cuadros_totales != null) lineas.push('  Cuadros mostrados en el navegador: ' + (r.mostrado ? r.mostrado.cuadros_mostrados + ' de ' + r.mostrado.cuadros_totales : r.cuadros_mostrados + ' de ' + r.cuadros_totales) + ' (mostrado no significa revisado).');
+  lineas.push('', 'Paquete: ' + (q.estado === 'no_creado' ? 'no se creó' : estadoPaquete(s)[2]) + '.' + (q.archivos ? ' ' + plural(q.archivos, 'archivo DICOM', 'archivos DICOM') + '.' : '') + (q.acciones_pendientes && q.acciones_pendientes.length ? ' Acciones pendientes: ' + q.acciones_pendientes.length + '.' : ''));
+  lineas.push('', 'Estado comprobado: ' + fechaLegible(s.comprobado) + '. Este resumen describe registros de la aplicación; no certifica el anonimato ni autoriza a compartir.');
+  return lineas.join('\n');
+}
+function pintarCorrida(t) {
+  ULTIMA = t; COMPROBADO = new Date();
+  const s = t.situacion; if (!s) return;
+  $('#rap-franja').classList.remove('oculto', 'caduco'); $('#rap-area-proceso').classList.remove('oculto');
+  celdaFranja('#rap-f-proceso', ...estadoProceso(t, s)); celdaFranja('#rap-f-revision', ...estadoRevision(s)); celdaFranja('#rap-f-paquete', ...estadoPaquete(s));
+  const frases = {en_curso: 'Seis comprobaciones, una tras otra, sobre los archivos de la carpeta elegida. La aplicación no puede medir cuánto falta de un paso: muestra cuál está en curso y el tiempo transcurrido.',
+    terminado: 'Terminó sin errores. Este resultado habla de etiquetas, bytes y números; lo que se ve en las imágenes lo revisa una persona.',
+    terminado_con_avisos: 'Terminó, con avisos. Un aviso informa y deja seguir; léelo antes de revisar las imágenes.',
+    detenido: (t.mensaje || 'El proceso se detuvo.') + ' Abre el paso detenido para ver qué significa y qué puedes hacer.'};
+  texto('#rap-proceso-frase', frases[s.procesamiento.estado] || '');
+  pintarPasos(t); pintarResumen(t, s); pintarAreaRevision(t, s); pintarAreaPaquete(t, s);
   pintarAvanceCorrida(t.progreso || AVANCE_CORRIDA);
+}
+// Vuelve a preguntar al servidor por el estado de la corrida. Si no contesta, lo que hay en pantalla se marca como sin
+// comprobar: un resumen que se quedó a la vista no se presenta como vigente.
+async function comprobarCorrida() {
+  const trabajo = RAPIDO; if (!trabajo || (ULTIMA && ULTIMA.estado === 'corriendo')) return;
+  try { const t = await api('trabajo/' + trabajo); if (trabajo !== RAPIDO) return; mensaje('#rap-estado', '', ''); pintarCorrida(t); }
+  catch (err) {
+    if (trabajo !== RAPIDO) return;
+    $('#rap-franja').classList.add('caduco');
+    mensaje('#rap-estado', 'error', 'No se pudo comprobar el estado de la corrida (' + err.message + '). Lo que se ve abajo es de la última comprobación' +
+      (COMPROBADO ? ', a las ' + COMPROBADO.toLocaleTimeString('es', {hour: '2-digit', minute: '2-digit'}) : '') + ', y puede haber cambiado.');
+    botonReintentar('#rap-estado', 'Volver a comprobar', comprobarCorrida);
+  }
 }
 function pintarAvanceCorrida(p) {
   AVANCE_CORRIDA = p || null;
@@ -3028,57 +3477,71 @@ function pintarAvanceCorrida(p) {
     const completas = (p.series || []).filter(x => x.mostrados === x.total).length;
     texto('#rap-progreso', 'Mostrados en este navegador: ' + p.mostrados + ' de ' + p.total + ' cuadros de la corrida' + (enSerie ? ' · ' + enSerie.mostrados + ' de ' + enSerie.total + ' en esta serie' : '') +
       ' · ' + completas + ' de ' + (p.series || []).length + ' series completas. Mostrado no significa revisado.');
-    document.querySelectorAll('#rap-series button').forEach((b, j) => { const x = (p.series || [])[j]; if (x && b.dataset.rotulo) b.textContent = b.dataset.rotulo + ' · ' + x.mostrados + '/' + x.total; });
-  } else texto('#rap-progreso', '');
-  const b = $('#btn-rap-revision');
+    $('#rap-barra').style.width = (p.total ? Math.round(100 * p.mostrados / p.total) : 0) + '%';
+    document.querySelectorAll('#rap-series button').forEach((b, j) => { const x = (p.series || [])[j]; if (!x) return; b.querySelector('.avance').textContent = x.mostrados + ' de ' + x.total + ' mostrados'; b.querySelector('.barra i').style.width = (x.total ? Math.round(100 * x.mostrados / x.total) : 0) + '%'; });
+  } else { texto('#rap-progreso', ''); $('#rap-barra').style.width = '0%'; }
+  const b = $('#btn-rap-revision'), sinVerificar = ULTIMA && ULTIMA.situacion && ULTIMA.situacion.revision.estado === 'no_verificable';
   b.disabled = BLOQUEO_REVISION || !completo;
-  b.title = BLOQUEO_REVISION ? 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas'
-    : (completo ? '' : 'Se habilita cuando todos los cuadros de la corrida han estado en pantalla en este navegador');
+  let porque = '';
+  if (sinVerificar) porque = 'Deshabilitado hasta que el estado de las retiradas se pueda verificar.';
+  else if (BLOQUEO_REVISION) porque = 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas.';
+  else if (p && !completo) { const faltan = (p.series || []).filter(x => x.mostrados < x.total).map(x => (x.total - x.mostrados) + ' de la serie ' + ((CORRIDA.series[x.indice] || {}).modalidad || (x.indice + 1)));
+    porque = 'El botón se habilita cuando los ' + p.total + ' cuadros hayan estado en pantalla. Faltan ' + (p.total - p.mostrados) + (faltan.length ? ': ' + faltan.join(', ') : '') + '.'; }
+  else if (completo) porque = 'Todos los cuadros han estado en pantalla. Declarar es afirmar, con tu nombre, que los examinaste.';
+  b.title = porque; texto('#rap-porque', porque);
 }
 $('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rapido').onclick = async () => {
   const origen = $('#rap-origen').value.trim();
   if (!origen) { mensaje('#rap-estado', 'aviso', 'Elige o escribe la carpeta del estudio.'); return; }
-  $('#btn-rapido').disabled = true; $('#rap-revision').classList.add('oculto'); $('#rap-visor').classList.add('oculto'); $('#rap-pasos').textContent = ''; $('#rap-detalles').classList.add('oculto');
+  $('#btn-rapido').disabled = true; ABIERTOS.clear(); ULTIMA = null; AVANCE_CORRIDA = null;
+  for (const sel of ['#rap-franja', '#rap-area-resumen', '#rap-area-proceso', '#rap-area-revision', '#rap-area-paquete', '#rap-visor', '#rap-revision']) $(sel).classList.add('oculto');
+  $('#rap-pasos').textContent = '';
   const inicio = Date.now(); const reloj = () => { const s = Math.round((Date.now() - inicio) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
-  mensaje('#rap-estado', 'neutro', 'en curso · 00:00');
+  mensaje('#rap-estado', '', ''); texto('#rap-reloj', 'Procesando… tiempo transcurrido 00:00');
   try {
     const r = await api('rapido', {origen, destino: $('#rap-destino').value.trim()});
     RAPIDO = r.trabajo;
     seguirTrabajo(r.trabajo, {
       vigente: () => RAPIDO === r.trabajo,
-      cada: t => { pintarPasos(t); mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj()); },
-      reintentando: n => mensaje('#rap-estado', 'neutro', 'en curso · ' + reloj() + ' · sin respuesta de la aplicación, reintentando (' + n + ' de 5)'),
+      cada: t => { mensaje('#rap-estado', '', ''); pintarCorrida(t); texto('#rap-reloj', 'Procesando… tiempo transcurrido ' + reloj()); },
+      reintentando: n => { texto('#rap-reloj', 'Procesando… tiempo transcurrido ' + reloj()); mensaje('#rap-estado', 'neutro', 'Sin respuesta de la aplicación; reintentando (' + n + ' de 5).'); },
       sinRespuesta: (err, reanudar) => {
         mensaje('#rap-estado', 'error', 'No se pudo consultar el estado de la corrida (' + err.message + '). La corrida puede seguir en marcha en la aplicación.');
-        botonReintentar('#rap-estado', 'Volver a consultar', reanudar); $('#btn-rapido').disabled = false;
+        botonReintentar('#rap-estado', 'Volver a consultar', reanudar); $('#btn-rapido').disabled = false; $('#rap-franja').classList.add('caduco');
       },
       fin: t => {
-        pintarPasos(t); texto('#rap-reloj', 'terminó en ' + reloj()); pintarResultadoRapido(t); $('#btn-rapido').disabled = false;
+        mensaje('#rap-estado', '', ''); texto('#rap-reloj', (t.estado === 'error' ? 'El proceso se detuvo a los ' : 'El proceso terminó en ') + reloj() + '.');
+        const fallo = (t.pasos || []).find(x => x.estado === 'error'); if (fallo) ABIERTOS.add(fallo.clave);
+        pintarCorrida(t); $('#btn-rapido').disabled = false;
         if (t.zip) cargarVisorCorrida(r.trabajo);
         ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = [];
       },
     });
-  } catch (err) { mensaje('#rap-estado', 'error', err.message); $('#btn-rapido').disabled = false; }
+  } catch (err) { mensaje('#rap-estado', 'error', err.message); texto('#rap-reloj', ''); $('#btn-rapido').disabled = false; }
 };
 $('#btn-rap-revision').onclick = async () => {
   const revisor = $('#rap-revisor').value.trim(), trabajo = RAPIDO;
-  if (!revisor) { mensaje('#rap-estado', 'aviso', 'Indica quién revisa antes de registrar.'); return; }
-  $('#btn-rap-revision').disabled = true;
-  try {
-    const r = await api('rapido/revision', {trabajo, revisor});
-    if (trabajo !== RAPIDO) return;
-    const pend = r.revision_pixeles_pendiente || [], resto = r.pendiente_anterior_no_eliminado || [], post = r.avisos_posteriores || [];
-    const tipo = (pend.length || r.avisos || resto.length || post.length) ? 'aviso' : 'ok';
-    mensaje('#rap-estado', tipo, r.mensaje + ' Zip: ' + r.zip + (pend.length ? ' Revisión de píxeles aún pendiente para: ' + pend.join(', ') + '.' : '') +
-      (resto.length ? ' No se pudo eliminar el zip pendiente de la carpeta de trabajo: ' + resto.join(', ') + '; bórralo a mano.' : '') +
-      (post.length ? ' El zip está publicado; quedaron avisos: ' + post.join('; ') + '.' : '') +
-      (r.destino_sincronizado ? ' El destino está sincronizado con la nube (' + r.destino_sincronizado + ').' : ''));
-    $('#rap-revision').classList.toggle('oculto', pend.length === 0);
-  } catch (err) { if (trabajo === RAPIDO) mensaje('#rap-estado', 'error', err.message); }
-  finally { pintarAvanceCorrida(AVANCE_CORRIDA); }
+  if (!revisor) { texto('#rap-porque', 'Escribe tu nombre antes de declarar.'); $('#rap-revisor').focus(); return; }
+  $('#btn-rap-revision').disabled = true; texto('#rap-porque', 'Registrando la revisión y publicando el zip…');
+  let fallo = null;
+  try { await api('rapido/revision', {trabajo, revisor}); } catch (err) { fallo = err; }
+  if (trabajo !== RAPIDO) return;
+  await comprobarCorrida(); pintarAvanceCorrida(AVANCE_CORRIDA);
+  // El motivo exacto que dio el servidor se conserva a la vista, además de lo que muestren los apartados de abajo.
+  if (fallo) mensaje('#rap-estado', 'error', 'La revisión no se registró. ' + fallo.message);
 };
+$('#btn-rap-comprobar').onclick = comprobarCorrida;
+$('#btn-rap-copiar').onclick = async () => {
+  if (!ULTIMA || !ULTIMA.situacion) return;
+  const txt = textoResumen(ULTIMA, ULTIMA.situacion);
+  try { await navigator.clipboard.writeText(txt); texto('#rap-comprobado', 'Resumen copiado.'); }
+  catch (err) { const a = $('#rap-copia'); a.value = txt; a.classList.remove('oculto'); a.focus(); a.select(); texto('#rap-comprobado', 'No se pudo copiar solo: el texto está seleccionado abajo, cópialo con el teclado.'); }
+};
+// Al volver a esta pestaña o a esta ventana, el estado de una corrida terminada se vuelve a pedir: no se muestra de memoria.
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && $('#rapido').classList.contains('activa')) comprobarCorrida(); });
+document.querySelector('nav button[data-tab=rapido]').addEventListener('click', () => comprobarCorrida());
 let CORRIDA = {trabajo: null, series: [], indice: 0};
 function pintarCorteCorrida(conservarCuadro) {
   const s = CORRIDA.series[CORRIDA.indice]; if (!s) return;
@@ -3088,11 +3551,12 @@ function pintarCorteCorrida(conservarCuadro) {
   if (!conservarCuadro || parseInt(dc.max, 10) !== cuadros) { dc.min = 1; dc.max = cuadros; dc.value = 1; }
   const c = Math.min(Math.max(parseInt(dc.value, 10) || 1, 1), cuadros);
   $('#rap-corte').src = '/api/rapido/' + encodeURIComponent(CORRIDA.trabajo) + '/corte/' + CORRIDA.indice + '/' + k + '?ventana=' + encodeURIComponent($('#rap-ventana').value) + '&cuadro=' + c + '&t=' + encodeURIComponent(T);
+  $('#rap-corte').alt = 'Corte ' + k + ' de ' + s.n + ' de la serie ' + (s.modalidad || '');
   texto('#rap-etiqueta', 'corte ' + k + ' de ' + s.n + ' · ' + s.nombres[k - 1] + (cuadros > 1 ? ' · cuadro ' + c + ' de ' + cuadros : ''));
 }
 function elegirSerieCorrida(i) {
   CORRIDA.indice = i; const s = CORRIDA.series[i];
-  document.querySelectorAll('#rap-series button').forEach((b, j) => b.classList.toggle('primario', j === i));
+  document.querySelectorAll('#rap-series button').forEach((b, j) => { b.classList.toggle('activa', j === i); b.setAttribute('aria-pressed', j === i ? 'true' : 'false'); });
   const d = $('#rap-deslizador'); d.min = 1; d.max = s.n; d.value = 1;
   $('#rap-ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
   pintarDemografia('#rap-etiqueta-estudio', '#rap-aviso-demografia', s.demografia);
@@ -3106,7 +3570,12 @@ async function cargarVisorCorrida(trabajo) {
     if (trabajo !== RAPIDO) return;
     CORRIDA = {trabajo, series, indice: 0};
     const cont = $('#rap-series'); cont.textContent = '';
-    series.forEach((s, i) => { const b = document.createElement('button'); b.dataset.rotulo = (s.modalidad || 'serie') + ' · ' + s.n + ' cortes · ' + s.serie.split('/').pop(); b.textContent = b.dataset.rotulo; b.onclick = () => elegirSerieCorrida(i); cont.appendChild(b); });
+    series.forEach((s, i) => {
+      const b = el('button', 'serie'); b.type = 'button'; b.title = s.serie.split('/').pop();
+      b.appendChild(el('b', null, (s.modalidad || 'serie') + ' · ' + plural(s.n, 'corte', 'cortes'))); b.appendChild(el('span', 'avance', ''));
+      const barra = el('span', 'barra'); barra.appendChild(el('i')); b.appendChild(barra);
+      b.onclick = () => elegirSerieCorrida(i); cont.appendChild(b);
+    });
     try { pintarAvanceCorrida(await api('rapido/' + trabajo + '/progreso')); } catch (err) { pintarAvanceCorrida(null); }
     $('#rap-visor').classList.toggle('oculto', series.length === 0);
     if (series.length) elegirSerieCorrida(0);
@@ -3114,7 +3583,8 @@ async function cargarVisorCorrida(trabajo) {
 }
 alMostrar($('#rap-corte'), async src => {
   const m = src.match(/\/api\/rapido\/([^/]+)\/corte\/(\d+)\/(\d+)\?.*?cuadro=(\d+)/); if (!m || decodeURIComponent(m[1]) !== RAPIDO) return;
-  try { const p = await api('rapido/' + m[1] + '/mostrado', {indice: Number(m[2]), k: Number(m[3]), cuadro: Number(m[4])}); if (decodeURIComponent(m[1]) === RAPIDO) pintarAvanceCorrida(p); }
+  try { const p = await api('rapido/' + m[1] + '/mostrado', {indice: Number(m[2]), k: Number(m[3]), cuadro: Number(m[4])}); if (decodeURIComponent(m[1]) === RAPIDO) { pintarAvanceCorrida(p);
+    if (ULTIMA && ULTIMA.situacion && ULTIMA.situacion.revision.estado === 'pendiente') { ULTIMA.situacion.revision.cuadros_mostrados = p.mostrados; celdaFranja('#rap-f-revision', ...estadoRevision(ULTIMA.situacion)); pintarResumen(ULTIMA, ULTIMA.situacion); } } }
   catch (err) { /* el recuento se vuelve a pedir al cambiar de serie */ }
 });
 recorrido($('#btn-rap-recorrer'), $('#rap-corte'), () => {
@@ -3129,7 +3599,7 @@ $('#rap-cuadro').oninput = () => pintarCorteCorrida(true);
 $('#rap-ventana').onchange = () => pintarCorteCorrida(true);
 $('#rap-corte').onerror = async () => {
   texto('#rap-etiqueta', 'Este corte no se puede mostrar: el archivo cambió desde la corrida o el visor no sabe dibujar esta imagen.');
-  try { const t = await api('trabajo/' + CORRIDA.trabajo); if (CORRIDA.trabajo === RAPIDO) pintarResultadoRapido(t); } catch (err) { /* el estado se vuelve a pedir al registrar */ }
+  try { const t = await api('trabajo/' + CORRIDA.trabajo); if (CORRIDA.trabajo === RAPIDO) pintarCorrida(t); } catch (err) { /* el estado se vuelve a pedir al registrar */ }
 };
 $('#btn-origen').onclick = async () => {
   const r = await api('elegir-carpeta', {});

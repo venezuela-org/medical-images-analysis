@@ -171,13 +171,33 @@ def main() -> int:
 
             pag.route("**/api/trabajo/*", cortar_algunas)
             pag.click("#btn-rapido")
-            expect(pag.locator("#rap-estado")).to_contain_text("revisión de píxeles pendiente", timeout=180000)
+            # tres estados separados: el proceso terminó, la revisión está pendiente y el paquete no ha salido
+            expect(pag.locator("#rap-f-paquete")).to_contain_text("Creado, sin publicar", timeout=180000)
+            expect(pag.locator("#rap-f-proceso")).to_contain_text("Terminado")
+            expect(pag.locator("#rap-f-proceso")).to_contain_text("6 de 6 comprobaciones correctas")
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Pendiente")
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Nadie ha declarado la revisión")
+            expect(pag.locator("#rap-f-revision")).to_have_class(re.compile(r"\baviso\b"))      # el proceso en verde no pone en verde la revisión
             expect(pag.locator("#rap-pasos .paso-fila")).to_have_count(6)
-            expect(pag.locator("#rap-pasos")).to_contain_text("COINCIDE")
-            expect(pag.locator("#rap-pasos")).to_contain_text("IDENTICO")
-            expect(pag.locator("#rap-pasos .insignia.error")).to_have_count(0)
+            expect(pag.locator("#rap-pasos .paso-fila[data-estado=ok]")).to_have_count(6)
+            expect(pag.locator("#rap-pasos .paso-fila[data-estado=error]")).to_have_count(0)
+            fila_limpieza = pag.locator("#rap-pasos .paso-fila[data-clave=limpieza]")
+            expect(fila_limpieza.locator(".paso-estado")).to_have_text("Correcto")
+            expect(fila_limpieza.locator(".paso-resumen")).to_contain_text("16 archivos anonimizados, de 1 paciente")
+            expect(fila_limpieza.locator(".paso-cifra")).to_contain_text("16")
+            expect(pag.locator("#rap-pasos .paso-fila[data-clave=cotejo] .paso-resumen")).to_contain_text("los 16 coinciden byte a byte")
+            expect(pag.locator("#rap-pasos .paso-fila[data-clave=suv] .paso-resumen")).to_contain_text("1 serie PET con valores idénticos")
+            fila_limpieza.locator("> summary").click()                 # cada paso se abre: qué comprueba, sus cifras y la salida
+            expect(fila_limpieza.locator(".paso-detalle")).to_contain_text("Omitidos por no ser imágenes DICOM")
+            expect(fila_limpieza.locator(".paso-detalle")).to_contain_text("DICOM apartados en cuarentena")
+            fila_limpieza.locator("> summary").click()
             expect(pag.locator("#rap-revision")).not_to_have_class(re.compile(r"\boculto\b"))
+            expect(pag.locator("#rap-resumen")).to_contain_text("Pendiente: nadie la ha declarado")
+            expect(pag.locator("#rap-resumen")).to_contain_text("PET-CT local")
+            expect(pag.locator("#rap-paquete-ficha")).to_contain_text("Creado, sin publicar")
+            expect(pag.locator("#rap-paquete-ficha")).to_contain_text("Adónde irá")
             ok(True, "modo rápido: seis pasos sin fallos; el zip nace pendiente y los controles de revisión quedan a la vista")
+            ok(True, "modo rápido: procesamiento, revisión y paquete se muestran por separado, cada uno con su estado")
             ok(consultas_cortadas["vistos"] == 2, "modo rápido: dos consultas de estado fallidas no dejan la pantalla colgada")
             pag.unroute("**/api/trabajo/*")
             # el visor de la corrida: exactamente los archivos del paquete, en el orden de sus nombres
@@ -203,13 +223,27 @@ def main() -> int:
             expect(pag.locator("#btn-rap-revision")).to_be_enabled()
             ok(True, "modo rápido: el botón de la revisión se habilita solo cuando los 16 cuadros han estado en pantalla")
             pag.click("#btn-rap-revision")                      # sin nombre: no registra
-            expect(pag.locator("#rap-estado")).to_contain_text("Indica quién revisa")
+            expect(pag.locator("#rap-porque")).to_contain_text("Escribe tu nombre")
             pag.fill("#rap-revisor", "prueba")
+            pag.press("#rap-revisor", "Enter")                  # Intro en el nombre no declara nada: hay que pulsar el botón
+            pag.wait_for_timeout(400)
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Pendiente")
             pag.click("#btn-rap-revision")
-            expect(pag.locator("#rap-estado")).to_contain_text("Zip revisado y guardado en el destino", timeout=60000)
-            expect(pag.locator("#rap-estado .mensaje")).to_have_class(re.compile(r"\bok\b"))
+            expect(pag.locator("#rap-f-paquete")).to_contain_text("Publicado en el destino", timeout=60000)
+            expect(pag.locator("#rap-f-paquete")).to_have_class(re.compile(r"\bok\b"))
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Registrada")
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Declarada por prueba")
             expect(pag.locator("#rap-revision")).to_have_class(re.compile(r"\boculto\b"))
+            expect(pag.locator("#rap-resumen")).to_contain_text("Registrada y vigente")
+            expect(pag.locator("#rap-resumen")).to_contain_text("16 de 16, en el navegador")
+            expect(pag.locator("#rap-resumen")).to_contain_text("Ninguna")
             ok(True, "modo rápido: el sello de revisión deja el zip en el destino y oculta los controles")
+            # el resumen que se copia: estados, cifras y versiones; ni rutas, ni nombres de archivo, ni quién revisó
+            copiado = pag.evaluate("textoResumen(ULTIMA, ULTIMA.situacion)")
+            ok("Revisión de píxeles: Registrada" in copiado and "Paquete: Publicado en el destino" in copiado and "PET-CT local" in copiado
+               and "prueba" not in copiado and not re.search(r"[\\/][A-Za-z_.~]", copiado.replace("pet-ct-local/0", "").replace("original / limpio", ""))
+               and ".dcm" not in copiado and ".zip" not in copiado and "ANON-" not in copiado and "datos-pet" not in copiado,
+               "modo rápido: el resumen copiado lleva estados y cifras, sin rutas, nombres de archivo, etiqueta del estudio ni revisor")
 
             # retirar la revisión de la corrida desde Registro: con nombre y motivo; el original se conserva
             pag.click("nav.pestanas button[data-tab=registro]")
@@ -249,6 +283,26 @@ def main() -> int:
             expect(fila("Paciente ·")).to_contain_text("revisión retirada")
             ok(True, "Registro: retirar la revisión de la corrida deja constancia de quién y por qué, y señala el paquete afectado")
             pag.click("nav.pestanas button[data-tab=rapido]")
+            # al volver a Rápido el estado se pide de nuevo: la revisión retirada no se sigue mostrando como registrada
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Retirada", timeout=30000)
+            expect(pag.locator("#rap-f-paquete")).to_contain_text("revisión retirada")
+            expect(pag.locator("#rap-revision-aviso")).to_contain_text("La revisión de esta corrida se retiró")
+            expect(pag.locator("#rap-revision-aviso")).to_contain_text("ya no debe compartirse")
+            ok(True, "modo rápido: una revisión retirada en Registro se ve retirada al volver, con qué pasó, a qué afecta y qué hacer")
+            # el estado de las retiradas deja de poder verificarse: no se da nada por vigente y se dice qué diario es
+            bueno = diario.read_bytes()
+            diario.write_bytes(bueno[:25])
+            pag.click("#btn-rap-comprobar")
+            expect(pag.locator("#rap-f-revision")).to_contain_text("No verificable", timeout=30000)
+            expect(pag.locator("#rap-f-revision")).to_have_class(re.compile(r"\berror\b"))
+            expect(pag.locator("#rap-revision-aviso")).to_contain_text("No se puede verificar el estado de las retiradas")
+            expect(pag.locator("#rap-revision-aviso")).to_contain_text(diario.name)
+            expect(pag.locator("#rap-f-paquete")).to_contain_text("revisión sin verificar")
+            expect(pag.locator("#rap-f-proceso")).to_contain_text("Terminado")          # el procesamiento sigue siendo lo que fue
+            diario.write_bytes(bueno)
+            pag.locator("#rap-revision-aviso button", has_text="Volver a comprobar").click()
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Retirada", timeout=30000)
+            ok(True, "modo rápido: con un diario de retirada ilegible la revisión pasa a no verificable, y vuelve al leerse el diario")
             pag.screenshot(path=str(destino / f"{a.etiqueta}-0-rapido.png"), full_page=True)
 
             # consulta de estado que falla sin parar: mensaje claro, botón principal disponible y recuperación a petición
@@ -259,7 +313,8 @@ def main() -> int:
             expect(pag.locator("#btn-rapido")).to_be_enabled()
             cortado["si"] = False
             pag.click("#rap-estado button.reintentar")
-            expect(pag.locator("#rap-estado")).to_contain_text("revisión de píxeles pendiente", timeout=180000)
+            expect(pag.locator("#rap-f-paquete")).to_contain_text("Creado, sin publicar", timeout=180000)
+            expect(pag.locator("#rap-f-revision")).to_contain_text("Pendiente")
             expect(pag.locator("#rap-pasos .paso-fila")).to_have_count(6)
             ok(True, "modo rápido: si la consulta de estado falla sin parar, se dice, el botón vuelve y 'Volver a consultar' recupera la corrida")
             pag.unroute("**/api/trabajo/*")

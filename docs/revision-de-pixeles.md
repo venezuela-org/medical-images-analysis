@@ -42,6 +42,12 @@ La declaración de una corrida del modo rápido es un solo acto. Por eso retirar
 
 Ningún registro de revisión se sobrescribe sin dejar antes una copia en el historial, tampoco al registrar una revisión nueva sobre otra anterior.
 
+### Cómo se ve en la pestaña Rápido
+
+Desde la v0.10.0 la pestaña muestra tres estados separados: el procesamiento, la revisión de píxeles y el paquete. La revisión puede estar pendiente, registrada, retirada o no verificable, y ese estado se calcula cada vez que se consulta, con el registro de la revisión y los diarios de retirada que hay en el disco. Al volver a la pestaña o a la ventana se pide de nuevo; si la aplicación no contesta, la pantalla lo dice y marca el estado como sin comprobar.
+
+Que un paquete esté publicado y que su revisión siga valiendo son dos cosas distintas en la pantalla: un zip publicado cuya revisión se retiró aparece como "Publicado; revisión retirada", con el aviso de que ya no debe compartirse.
+
 ### Retirar y empaquetar a la vez
 
 El empaquetado de la pestaña Enviar, las retiradas, las corridas del modo rápido y el registro de revisiones usan el mismo candado: mientras uno está en marcha, los demás esperan. Además, el empaquetador vuelve a comprobar, antes de dejar evidencias y justo antes de publicar, que la revisión de cada paciente que va a salir como revisado sigue siendo el mismo registro y sigue sin retirar. Si dejó de valer, el paquete no se publica y se dice de qué paciente y por qué; al volver a empaquetar, sale con la revisión pendiente.
