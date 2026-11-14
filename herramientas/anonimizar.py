@@ -73,7 +73,7 @@ from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, UID  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True  # elementos privados mal formados no detienen la corrida
 
-VERSION = "0.4.10"
+VERSION = "0.4.11"
 POLITICA = "pet-ct-local/0.4"
 RAIZ_UID = "1.2.826.0.1.3680043.8.498."     # raíz pydicom, libre de uso; identifica los UID reescritos
 DICOM_ROOT = "1.2.840.10008"
@@ -1036,6 +1036,37 @@ def solo_cambia_version(existente: Path, nuevos_bytes: bytes) -> bool:
         return False
 
 
+MOTIVO_OTRO_CONTENIDO = "misma instancia SOP con contenido distinto / same SOP instance, different content"
+MOTIVO_OTRA_OPCION = ("misma instancia, ya guardada con la otra opción de descripciones / "
+                      "same instance, already stored with the other descriptions option")
+
+
+def solo_cambian_descripciones(existente: Path, nuevos_bytes: bytes) -> bool:
+    """¿El archivo guardado y el nuevo son la misma imagen limpia y difieren solo en los textos que la opción
+    --conservar-descripciones decide (TEXTO_REVISADO) y, si acaso, en el nombre de versión de la herramienta?
+    Es un diagnóstico: sirve para decir por qué la imagen nueva no se guardó. No autoriza a sustituir nada."""
+    try:
+        import io
+        ds_e = pydicom.dcmread(io.BytesIO(existente.read_bytes()), force=True)
+        ds_n = pydicom.dcmread(io.BytesIO(nuevos_bytes), force=True)
+
+        def sin_descripciones(d: Dataset) -> None:
+            for e in list(d):
+                if e.keyword in TEXTO_REVISADO:
+                    del d[e.tag]
+                elif str(e.VR) == "SQ":
+                    for item in e.value:
+                        sin_descripciones(item)
+
+        habia = any(e.keyword in TEXTO_REVISADO for d in (ds_e, ds_n) for e in d.iterall())
+        sin_descripciones(ds_e)
+        sin_descripciones(ds_n)
+        ds_e.file_meta.ImplementationVersionName = ds_n.file_meta.get("ImplementationVersionName", "")
+        return habia and canonico(ds_e) == canonico(ds_n)
+    except Exception:
+        return False
+
+
 class IndiceOrigen:
     """Índice PRIVADO limpio → original (y la carpeta de entrada), una línea JSON por archivo, sin repetidos.
     Permite el panel antes/después de la app y la ejecución de cotejar desde ella."""
@@ -1212,8 +1243,11 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
                     anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
+                # Se dice por qué: no es lo mismo otra copia de la imagen que la misma imagen limpiada antes con la otra
+                # opción de descripciones. En los dos casos la copia guardada se queda como está.
+                motivo = MOTIVO_OTRA_OPCION if solo_cambian_descripciones(ruta_salida, nuevos_bytes) else MOTIVO_OTRO_CONTENIDO
                 os.unlink(tmp)
-                cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": "misma instancia SOP con contenido distinto / same SOP instance, different content"})
+                cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": motivo})
                 # El original no se copia, pero lo que dice de la edad y el sexo sí cuenta: es otro registro de la misma
                 # instancia, y si discrepa del ya guardado el estudio debe mostrar el conflicto.
                 anotar_observacion(demografia_en_conflicto, ruta_salida.relative_to(salida).as_posix(), observacion)

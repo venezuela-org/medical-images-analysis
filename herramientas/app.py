@@ -329,11 +329,111 @@ def ordenar_serie(archivos: list[Path], cabeceras: dict | None = None) -> dict:
             "cuadros": {i["ruta"].name: i.get("cuadros", 1) for i in items}}
 
 
-def mapa_exportacion(rels: list[str]) -> tuple[dict[str, str], dict[str, dict]]:
+CANDADO_ESTUDIOS = threading.Lock()
+
+
+def numeros_de_estudio(estudios: dict[str, set[str]] | None = None) -> tuple[dict[str, dict[str, int]], str | None]:
+    """El número de cada estudio dentro de su paciente: {paciente: {carpeta del estudio: número}}.
+
+    Es un número de orden para las personas ("Estudio 1"), no un dato del DICOM. Se asigna una sola vez, la primera vez
+    que la aplicación ve el estudio, y no cambia después: el mismo estudio lleva el mismo número en todos los paquetes
+    hechos con esta carpeta de trabajo. El orden es el de llegada a la aplicación, que puede no ser el de las fechas.
+    Se guarda en limpios_PRIVADO/estudios.json y no sale de la computadora; al paquete solo va el número.
+
+    Con `estudios` ({paciente: {carpetas}}) se numeran los que falten. Si el registro existe y no se puede leer, no se
+    toca y no se numera nada: se devuelve el motivo, y quien llama usa los nombres internos."""
+    ruta = carpeta_privada() / "estudios.json"
+    with CANDADO_ESTUDIOS:
+        registro: dict[str, dict[str, int]] = {}
+        if ruta.exists():
+            try:
+                datos = json.loads(ruta.read_text(encoding="utf-8"))
+                registro = datos["pacientes"]
+                if not isinstance(registro, dict) or any(
+                        not isinstance(v, dict) or any(not isinstance(n, int) or isinstance(n, bool) or n < 1 for n in v.values())
+                        or len(set(v.values())) != len(v) for v in registro.values()):
+                    raise ValueError("estructura")
+            except (OSError, ValueError, KeyError, TypeError):
+                return {}, "el registro de números de estudio (estudios.json) no se puede leer"
+        nuevos = False
+        for pac in sorted(estudios or {}):
+            del_paciente = registro.setdefault(pac, {})
+            for carpeta in sorted(estudios[pac]):
+                if carpeta not in del_paciente:
+                    del_paciente[carpeta] = max(del_paciente.values(), default=0) + 1
+                    nuevos = True
+            if not del_paciente:
+                registro.pop(pac)
+        if nuevos:
+            try:
+                carpeta_privada().mkdir(parents=True, exist_ok=True)
+                _escribir_json(ruta, {"version": 1, "pacientes": registro,
+                                      "nota": "Número de orden de cada estudio dentro de su paciente, por orden de llegada. No sale de esta computadora."})
+            except OSError as e:
+                return {}, f"el registro de números de estudio no se pudo guardar ({type(e).__name__})"
+        return registro, None
+
+
+EDAD_EN_CARPETA = {"años": "a", "meses": "m", "semanas": "sem", "días": "d"}
+
+
+def edad_para_carpeta(edad: dict) -> str | None:
+    """La edad en el estudio, en la forma corta que va en el nombre de la carpeta: 37a, 8m, 3sem, 12d, 90a-o-mas.
+    Solo cuando el estudio tiene una edad; una edad informada por el equipo, y no calculada, lo dice."""
+    if edad.get("estado") not in ("calculada", "informada") or edad.get("valor") is None:
+        return None
+    corta = f"{ANON.EDAD_AGRUPADA_DESDE}a-o-mas" if edad.get("agrupada") else f"{int(edad['valor'])}{EDAD_EN_CARPETA.get(edad.get('unidad'), '')}"
+    if not edad.get("agrupada") and edad.get("unidad") not in EDAD_EN_CARPETA:
+        return None
+    return corta + ("-informada" if edad["estado"] == "informada" else "")
+
+
+def carpetas_exportadas(rels: list[str], demografia: list[dict] | None = None) -> tuple[dict[str, str], str | None]:
+    """De 'PAC/estudio' (nombres internos) a la carpeta que lleva el paquete, y el motivo si no se pudo numerar.
+
+      ANON-0002/estudio_7b7191db84  ->  ANON-0002_F/estudio_01_37a
+
+    - El paciente lleva el sexo registrado cuando todos sus estudios del paquete registran el mismo; si falta o hay
+      conflicto, lleva solo el identificador.
+    - El estudio lleva su número dentro del paciente y, cuando la tiene, la edad en ese estudio. La edad es del estudio:
+      el mismo paciente puede tener estudios con edades distintas.
+    Son nombres de presentación del paquete. Los archivos limpios guardados, sus nombres internos y los DICOM no cambian."""
+    demografia = demografia_de(rels) if demografia is None else demografia
+    por_estudio = {f"{d['paciente']}/{d['estudio']}": d for d in demografia}
+    claves = sorted({"/".join(rel.split("/")[:2]) for rel in rels})
+    pedidos: dict[str, set[str]] = {}
+    for clave in claves:
+        pac, est = clave.split("/")
+        pedidos.setdefault(pac, set()).add(est)
+    numeros, problema = numeros_de_estudio(pedidos)
+    sexos: dict[str, set] = {}
+    for clave in claves:
+        sexo = (por_estudio.get(clave) or {}).get("sexo") or {}
+        sexos.setdefault(clave.split("/")[0], set()).add(sexo.get("valor") if sexo.get("estado") == "registrado" else None)
+    out = {}
+    for clave in claves:
+        pac, est = clave.split("/")
+        de_este = sexos[pac]
+        paciente = f"{pac}_{next(iter(de_este))}" if len(de_este) == 1 and None not in de_este else pac
+        numero = (numeros.get(pac) or {}).get(est)
+        if numero is None:
+            estudio = est                                             # sin número: el nombre interno, tal cual
+        else:
+            edad = edad_para_carpeta((por_estudio.get(clave) or {}).get("edad_en_el_estudio") or {})
+            estudio = f"estudio_{numero:02d}" + (f"_{edad}" if edad else "")
+        out[clave] = f"{paciente}/{estudio}"
+    if len(set(out.values())) != len(out):                            # dos estudios no pueden compartir carpeta
+        return {clave: clave for clave in claves}, "los nombres de carpeta no eran únicos"
+    return out, problema
+
+
+def mapa_exportacion(rels: list[str], demografia: list[dict] | None = None) -> tuple[dict[str, str], dict[str, dict]]:
     """De rutas internas (relativas a limpios/, con '/') a rutas exportadas, serie por serie:
-    PAC/estudio/serie/corte_000001_<nombre interno>.dcm. La numeración es independiente en cada serie y se calcula
-    solo sobre los archivos recibidos. Devuelve también el criterio y el aviso de cada serie."""
+    PAC_sexo/estudio_NN_edad/serie/corte_000001_<nombre interno>.dcm. La numeración de los cortes es independiente en
+    cada serie y se calcula solo sobre los archivos recibidos; las carpetas de paciente y de estudio las da
+    carpetas_exportadas(). Devuelve también el criterio y el aviso de cada serie, por su ruta interna."""
     limpios = (TRABAJO / "limpios").resolve()
+    carpetas, _ = carpetas_exportadas(rels, demografia)
     por_serie: dict[str, list[str]] = {}
     for rel in rels:
         por_serie.setdefault(rel.rsplit("/", 1)[0], []).append(rel)
@@ -341,11 +441,53 @@ def mapa_exportacion(rels: list[str]) -> tuple[dict[str, str], dict[str, dict]]:
     for serie in sorted(por_serie):
         o = ordenar_serie([limpios / r for r in por_serie[serie]])
         ancho = max(6, len(str(len(o["orden"]))))
+        pac, est, nombre_serie = serie.split("/")
+        exportada = f"{carpetas[f'{pac}/{est}']}/{nombre_serie}"
         for k, a in enumerate(o["orden"], 1):
-            mapa[f"{serie}/{a.name}"] = f"{serie}/corte_{k:0{ancho}d}_{a.stem}.dcm"
+            mapa[f"{serie}/{a.name}"] = f"{exportada}/corte_{k:0{ancho}d}_{a.stem}.dcm"
         info[serie] = {"criterio": o["criterio"], "aviso": o["aviso"], "archivos": len(o["orden"]),
                        "cuadros": [o["cuadros"].get(a.name, 1) for a in o["orden"]]}
     return mapa, info
+
+
+CARPETA_PACIENTE_RE = re.compile(r"^(?P<pac>[A-Z0-9]{2,12}-\d{4})(_[FMO])?$")
+CARPETA_ESTUDIO_RE = re.compile(r"^estudio_\d{2,}(_(\d{1,3}(a|m|sem|d)|\d{2,3}a-o-mas)(-informada)?)?$")
+
+
+def exportacion_coherente(internos: list[str], exportados: list[str]) -> bool:
+    """Lo que el empaquetador exige de una correspondencia de nombres antes de usarla, venga de donde venga:
+      - cada archivo va a PACIENTE/ESTUDIO/SERIE/archivo.dcm;
+      - la carpeta de la serie es la interna, sin cambios;
+      - la del paciente es su identificador, solo o seguido del sexo (ANON-0002 o ANON-0002_F);
+      - la del estudio es la interna o estudio_NN con la edad opcional (estudio_01, estudio_01_37a);
+      - cada paciente, cada estudio y cada serie internos van siempre a la misma carpeta, y dos distintos nunca a la misma."""
+    a_exportado: dict[str, str] = {}
+    a_interno: dict[str, str] = {}
+    for rel, exp in zip(internos, exportados):
+        i, e = rel.split("/"), exp.split("/")
+        if len(i) != 4 or len(e) != 4 or not exp.endswith(".dcm") or e[2] != i[2]:
+            return False
+        m = CARPETA_PACIENTE_RE.match(e[0])
+        if not m or m.group("pac") != i[0]:
+            return False
+        if e[1] != i[1] and not CARPETA_ESTUDIO_RE.match(e[1]):
+            return False
+        for nivel in (1, 2, 3):                                        # paciente, estudio, serie
+            interna, exportada = "/".join(i[:nivel]), "/".join(e[:nivel])
+            if a_exportado.setdefault(interna, exportada) != exportada or a_interno.setdefault(exportada, interna) != interna:
+                return False
+    return True
+
+
+def carpetas_de(exportacion: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Lo que una correspondencia ya fijada dice de las carpetas: paciente, estudio y serie internos -> exportados."""
+    out: dict[str, dict[str, str]] = {"pacientes": {}, "estudios": {}, "series": {}}
+    for interno, exportado in exportacion.items():
+        i, e = interno.split("/"), exportado.split("/")
+        out["pacientes"][i[0]] = e[0]
+        out["estudios"]["/".join(i[:2])] = "/".join(e[:2])
+        out["series"]["/".join(i[:3])] = "/".join(e[:3])
+    return out
 
 
 # --------------------------------------------------------------------------------------
@@ -442,6 +584,13 @@ def indexar() -> None:
     for s_ in INDICE.values():
         d = por_estudio.get(f"{s_['paciente']}/{s_['estudio']}")
         s_["demografia"], s_["etiqueta"] = d, (d or {}).get("etiqueta", s_["paciente"])
+    # el número de cada estudio dentro de su paciente; los que llegan por primera vez se numeran aquí
+    en_disco: dict[str, set[str]] = {}
+    for s_ in INDICE.values():
+        en_disco.setdefault(s_["paciente"], set()).add(s_["estudio"])
+    numeros, _ = numeros_de_estudio(en_disco)
+    for s_ in INDICE.values():
+        s_["estudio_numero"] = (numeros.get(s_["paciente"]) or {}).get(s_["estudio"])
     registrar(f"índice: {len(INDICE)} series")
 
 
@@ -660,6 +809,7 @@ def trabajo(request: Request, tid: str):
         t["indexado"] = True
         rep = carpeta_reportes() / "ultimo_reporte.md"
         t["reporte"] = rep.read_text(encoding="utf-8") if rep.exists() else ""
+        t["datos"] = datos_de_limpieza()                              # las cifras y los motivos, para explicar el resultado en pantalla
     out = {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida", "servidos", "mostrados")}
     if t.get("nombre") == "rapido" and t.get("pasos"):
         out["situacion"] = situacion_de_corrida(t)
@@ -914,13 +1064,13 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
     # nombres exportados: correspondencia explícita, comprobada antes de escribir nada
     internos = [rel for rel, _, _ in entradas]
     if exportacion is None:
-        exportacion, orden_series = mapa_exportacion(internos)
+        exportacion, orden_series = mapa_exportacion(internos, demografia)
     else:
         exportacion = dict(exportacion)                    # correspondencia fijada por quien llama (una corrida del modo rápido)
         orden_series = dict(orden_series) if orden_series else None
     exportados = [exportacion.get(rel) for rel in internos]
     if set(exportacion) != set(internos) or None in exportados or len(set(exportados)) != len(exportados) \
-            or any(not e.endswith(".dcm") or e.split("/")[:-1] != rel.split("/")[:-1] for rel, e in zip(internos, exportados)):
+            or not exportacion_coherente(internos, exportados):
         raise PaqueteRechazado(409, {"detail": "la correspondencia de nombres exportados no coincide con los archivos del paquete; nada se empaquetó"})
     if orden_series is None:
         orden_series = {}
@@ -933,6 +1083,12 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
     demografia = copy.deepcopy(demografia) if demografia is not None else demografia_de(internos)
     if {(d["paciente"], d["estudio"]) for d in demografia} != {tuple(rel.split("/")[:2]) for rel in internos}:
         raise PaqueteRechazado(409, {"detail": "la demografía no corresponde a los estudios del paquete; nada se empaquetó"})
+    # Qué carpeta del paquete es cada paciente, cada estudio y cada serie. Sale de la correspondencia ya fijada.
+    carpetas = carpetas_de(exportacion)
+    numeros, _ = numeros_de_estudio()
+    for d in demografia:
+        d["carpeta"] = carpetas["estudios"].get(f"{d['paciente']}/{d['estudio']}")
+        d["numero"] = (numeros.get(d["paciente"]) or {}).get(d["estudio"])
 
     try:
         politica = json.loads((limpios / ".politica.json").read_text(encoding="utf-8")).get("politica", "")
@@ -957,6 +1113,11 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
                   "aviso": aviso_manifiesto,
                   "archivos": [{"ruta": exp, "sha256": h, "bytes": len(datos)} for exp, datos, h, _ in entradas],
                   "nombres": "corte_NNNNNN es un índice de presentación por serie; no modifica InstanceNumber ni ningún otro atributo DICOM",
+                  "carpetas": {"nota": "Nombres de presentación de las carpetas del paquete. El paciente lleva el sexo registrado cuando todos sus "
+                                       "estudios del paquete registran el mismo. El estudio lleva su número de orden dentro del paciente (por orden "
+                                       "de llegada a la aplicación, no necesariamente por fecha) y, cuando la tiene, la edad en ese estudio. "
+                                       "No modifican ningún atributo DICOM.",
+                               "pacientes": carpetas["pacientes"], "estudios": carpetas["estudios"], "series": carpetas["series"]},
                   "retiradas": {"verificables": not retiradas["bloqueo"], "diarios_con_problemas": retiradas["problemas"],
                                 "nota": ("El estado de las retiradas de revisión no se pudo verificar al crear este paquete: ninguna revisión "
                                          "se da por vigente y el paquete no está revisado." if retiradas["bloqueo"] else
@@ -965,7 +1126,7 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
                                          "estudio, calculada antes de anonimizar las fechas. No se exportan la fecha de nacimiento ni la fecha "
                                          "original del estudio. 90 años o más se agrupan, como en PatientAge.",
                                  "estudios": demografia},
-                  "orden_de_cortes": {serie: ({"criterio": o["criterio"], "aviso": o["aviso"]} if o else {"criterio": "fijado en la corrida"})
+                  "orden_de_cortes": {carpetas["series"].get(serie, serie): ({"criterio": o["criterio"], "aviso": o["aviso"]} if o else {"criterio": "fijado en la corrida"})
                                       for serie, o in sorted(orden_series.items())},
                   "verificacion": "cada archivo verificado a partir de los mismos bytes que se empaquetaron"}
 
@@ -1172,7 +1333,7 @@ def clasificar_suv(codigo: int, informe: dict, salida: str) -> tuple[str, str]:
     return clasificar_suv_con_clase(codigo, informe, salida)[:2]
 
 
-def datos_de_limpieza(rels: list[str]) -> dict:
+def datos_de_limpieza(rels: list[str] | None = None) -> dict:
     """Las cifras de la limpieza que acaba de terminar, tomadas de su reporte (no de sus frases): cuántos archivos se
     leyeron, cuántos entran en esta corrida, cuántos se omitieron por no ser imágenes DICOM y cuántos DICOM quedaron en
     cuarentena, con sus motivos. Solo recuentos y motivos genéricos; ningún nombre de archivo."""
@@ -1184,11 +1345,15 @@ def datos_de_limpieza(rels: list[str]) -> dict:
     omitidos = {str(k): v for k, v in (r.get("archivos_omitidos") or {}).items() if isinstance(v, int)} if isinstance(r.get("archivos_omitidos"), dict) else {}
     cuarentena = r.get("cuarentena") if isinstance(r.get("cuarentena"), list) else None
     motivos = Counter(str(c.get("motivo") or "sin motivo anotado") for c in (cuarentena or []) if isinstance(c, dict))
-    return {"leidos": entero(r.get("archivos_leidos")), "en_la_corrida": len(rels), "escritos": entero(r.get("archivos_escritos")),
+    aceptados = len(rels) if rels is not None else sum(entero(r.get(k)) or 0 for k in ("archivos_escritos", "duplicados_omitidos", "actualizados_version"))
+    avisos = [str(x) for x in r.get("avisos") or []] if isinstance(r.get("avisos"), list) else []
+    return {"leidos": entero(r.get("archivos_leidos")), "en_la_corrida": aceptados, "escritos": entero(r.get("archivos_escritos")),
             "ya_guardados": entero(r.get("duplicados_omitidos")), "actualizados": entero(r.get("actualizados_version")),
             "omitidos": omitidos, "omitidos_total": sum(omitidos.values()) if isinstance(r.get("archivos_omitidos"), dict) else None,
             "cuarentena_total": len(cuarentena) if cuarentena is not None else None, "cuarentena_motivos": dict(motivos),
-            "pacientes": len({x.split("/")[0] for x in rels})}
+            "pacientes": len({x.split("/")[0] for x in rels}) if rels is not None else entero(r.get("pacientes")),
+            "conservar_descripciones": r.get("conservar_descripciones") if isinstance(r.get("conservar_descripciones"), bool) else None,
+            "descripciones_redactadas": sum(1 for x in avisos if "se redactó" in x)}
 
 
 def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
@@ -1241,7 +1406,17 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         indexar()
         archivos = [limpios / r_ for r_ in rels]
         if not rels or not all(a.is_file() for a in archivos):
-            return terminar("error", "Ningún archivo de esa carpeta quedó limpio (¿son CT, PET o MR?); no se creó ningún zip.")
+            cifras = pasos["limpieza"]["datos"]
+            ya_con_otra_opcion = sum(n for m, n in (cifras.get("cuarentena_motivos") or {}).items() if m == ANON.MOTIVO_OTRA_OPCION)
+            if ya_con_otra_opcion:
+                porque = (f"{ya_con_otra_opcion} imagen(es) de esa carpeta ya están guardadas, limpiadas con la casilla de conservar descripciones; "
+                          "el modo rápido limpia sin ella y no sustituye la copia guardada")
+            elif cifras.get("cuarentena_total"):
+                porque = f"los {cifras['cuarentena_total']} DICOM de esa carpeta quedaron en cuarentena"
+            else:
+                porque = "ningún archivo de esa carpeta quedó limpio (¿son CT, PET o MR?)"
+            paso("limpieza", "error", pasos["limpieza"]["resumen"], pasos["limpieza"]["salida"], cifras)
+            return terminar("error", porque[0].upper() + porque[1:] + "; no se creó ningún zip.")
         pacientes = sorted({r_.split("/")[0] for r_ in rels})
         t["pacientes"] = pacientes
         otros = {pac: len(hashes_paciente(pac)) - sum(1 for r_ in rels if r_.startswith(pac + "/")) for pac in pacientes}
@@ -1330,12 +1505,13 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         #    La correspondencia de nombres exportados se calcula UNA vez, sobre los archivos de esta corrida, y se congela:
         #    el zip pendiente y el revisado llevan los mismos nombres aunque después se importe más de este paciente.
         paso("paquete", "corriendo")
-        exportacion, orden_series = mapa_exportacion(rels)
+        demografia_corrida = demografia_de(rels)
+        exportacion, orden_series = mapa_exportacion(rels, demografia_corrida)
         t["exportacion"], t["orden_de_cortes"] = exportacion, orden_series
         t["series_corrida"] = series_congeladas(exportacion, orden_series)
         # La demografía de la corrida se calcula una vez, sobre sus archivos exactos, y se congela: el zip pendiente, el
         # revisado y el visor de la corrida muestran lo mismo aunque después se importe más de este paciente.
-        t["demografia"] = demografia_de(rels)
+        t["demografia"] = demografia_corrida
         try:
             r = crear_paquete(pacientes, TRABAJO / "paquetes", solo=set(rels), exportacion=exportacion, orden_series=orden_series,
                               demografia=t["demografia"], revision_corrida={"estado": "pendiente", "detalle": "revisión de píxeles de esta corrida sin registrar"})
@@ -1387,9 +1563,10 @@ def series_congeladas(exportacion: dict[str, str], orden_series: dict[str, dict]
     out = []
     for serie in sorted(por_serie):
         pares = sorted(por_serie[serie])
-        partes = serie.rsplit("/", 1)[1].split("_")
-        o = orden_series.get(serie) or {}
-        out.append({"serie": serie, "modalidad": partes[2] if len(partes) >= 4 else "", "n": len(pares),
+        interna = pares[0][1].rsplit("/", 1)[0]                       # la carpeta interna de la serie: por ella se guardó su criterio
+        partes = interna.rsplit("/", 1)[1].split("_")
+        o = orden_series.get(interna) or {}
+        out.append({"serie": serie, "serie_interna": interna, "modalidad": partes[2] if len(partes) >= 4 else "", "n": len(pares),
                     "criterio": o.get("criterio"), "aviso": o.get("aviso"),
                     "archivos": [interno for _, interno in pares], "nombres": [exportado.rsplit("/", 1)[1] for exportado, _ in pares],
                     "cuadros": list(o.get("cuadros") or [1] * len(pares))})
@@ -1548,7 +1725,7 @@ def rapido_series(request: Request, tid: str):
     auth(request)
     t = corrida_con_zip(tid)
     por_estudio = {f"{d['paciente']}/{d['estudio']}": d for d in t.get("demografia", [])}
-    return [{"indice": i, **{k: v for k, v in s_.items() if k != "archivos"}, "demografia": por_estudio.get(s_["serie"].rsplit("/", 1)[0])}
+    return [{"indice": i, **{k: v for k, v in s_.items() if k != "archivos"}, "demografia": por_estudio.get(s_.get("serie_interna", s_["serie"]).rsplit("/", 1)[0])}
             for i, s_ in enumerate(t["series_corrida"])]
 
 
@@ -2951,7 +3128,7 @@ HTML = """<!doctype html>
           <div id="rap-cuadros" class="oculto"><label class="terciario" for="rap-cuadro">Cuadros de este archivo</label><input type="range" id="rap-cuadro" min="1" max="1" value="1"></div>
           <p id="rap-etiqueta" class="mono"></p></div>
         <div><div id="rap-series" class="series" role="group" aria-label="Series del paquete"></div>
-          <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><button id="btn-rap-recorrer">Recorrer la serie</button></div>
+          <div class="fila"><label>Ventana <select id="rap-ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">automática (PET y RM; solo cambia la vista)</option></select></label><button id="btn-rap-recorrer">Recorrer la serie</button></div>
           <div class="mostrados"><p id="rap-progreso"></p><span class="barra"><i id="rap-barra"></i></span>
             <p class="terciario">Un cuadro mostrado es un cuadro que estuvo en pantalla. Que alguien lo haya examinado es lo que declara quien firma.</p></div>
           <div id="rap-orden"></div></div></div>
@@ -2977,9 +3154,15 @@ HTML = """<!doctype html>
   <div id="aviso-origen"></div>
   <p class="terciario">Carpeta de trabajo: <code id="trabajo"></code> <span id="aviso-trabajo"></span></p>
   <div class="fila"><label>Prefijo <input type="text" id="prefijo" class="corto"></label>
-    <label><input type="checkbox" id="conservar"> conservar descripciones de serie y protocolo (revisadas contra nombre e ID)</label>
+    <label><input type="checkbox" id="conservar" aria-describedby="ayuda-conservar"> conservar descripciones de estudio, serie y protocolo (revisadas contra nombre e ID)</label>
     <button id="btn-anonimizar" class="primario">Anonimizar</button></div>
+  <details class="ayuda" id="ayuda-conservar"><summary>Qué hace esa casilla</summary>
+    <p>Sin marcar, la limpieza elimina la descripción del estudio, la descripción de la serie y el nombre del protocolo; por ejemplo, «T1_3D_SAG». Marcada, los conserva, después de sustituir por [REDACTADO] el nombre o el ID del paciente si aparecen en ellos.</p>
+    <p>No conserva ningún otro dato del paciente. El nombre, el ID, las fechas y el resto de la identidad se quitan igual, con la casilla o sin ella. Esos textos los escribe una persona en el equipo y pueden decir algo que la aplicación no reconoce: si la marcas, léelos en la pestaña Estudios antes de compartir.</p>
+    <p>Se aplica a los estudios que todavía no están guardados en esta carpeta de trabajo. Volver a limpiar un estudio ya guardado con la casilla cambiada deja la copia guardada como estaba, y la limpieza lo dice. El modo rápido limpia siempre sin ella.</p>
+  </details>
   <div id="estado-anon"></div>
+  <div id="explicacion-anon"></div>
   <pre id="salida-anon" class="salida oculto"></pre>
   <details id="det-reporte" class="oculto"><summary>Reporte de la limpieza</summary><pre id="reporte-anon" class="salida"></pre></details>
 </section>
@@ -2988,7 +3171,7 @@ HTML = """<!doctype html>
   <div class="tabla-marco"><table id="tabla-series" class="datos"><thead><tr><th>Paciente</th><th>Sexo · edad en el estudio</th><th>Estudio</th><th>Serie</th><th>Mod.</th><th>Descripción</th><th class="num">Cortes</th><th>Matriz</th><th>Política</th></tr></thead><tbody></tbody></table></div>
   <div class="visor oculto" id="visor">
     <div><div class="lienzo"><img id="corte" alt="corte"></div><input type="range" id="deslizador" min="0" max="0" value="0">
-      <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">auto (PET, solo vista)</option></select></label><span id="pos" class="terciario"></span></div>
+      <div class="fila"><label>Ventana <select id="ventana"><option value="tejido">tejido blando</option><option value="pulmon">pulmón</option><option value="hueso">hueso</option><option value="cerebro">cerebro</option><option value="auto">automática (PET y RM; solo cambia la vista)</option></select></label><span id="pos" class="terciario"></span></div>
       <p class="terciario"><span id="nota-orden">Cortes ordenados por InstanceNumber.</span> Vista previa sin escala cuantitativa; el SUV se calcula en las comprobaciones, no aquí. Al exportar, los archivos se numeran con este mismo orden.</p>
       <div id="aviso-orden"></div>
       <div class="fila"><button id="btn-recorrer">Recorrer la serie</button><span id="rev-progreso" class="terciario"></span></div></div>
@@ -3067,7 +3250,8 @@ const api = async (ruta, cuerpo) => {
 };
 const mensaje = (sel, tipo, txt) => { const el = $(sel); el.textContent = ''; if (!txt) return el; const d = document.createElement('div'); d.className = 'mensaje ' + tipo; d.textContent = txt; el.appendChild(d); return el; };
 const insignia = (tipo, txt) => { const s = document.createElement('span'); s.className = 'insignia ' + tipo; s.textContent = txt; return s; };
-const celda = (tr, v, cls) => { const td = document.createElement('td'); td.textContent = v == null ? '' : String(v); if (cls) td.className = cls; tr.appendChild(td); };
+const nombreEstudio = s => s.estudio_numero ? 'Estudio ' + s.estudio_numero : s.estudio;
+const celda = (tr, v, cls) => { const td = document.createElement('td'); td.textContent = v == null ? '' : String(v); if (cls) td.className = cls; tr.appendChild(td); return td; };
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button, main section').forEach(x => x.classList.remove('activa'));
   b.classList.add('activa'); $('#' + b.dataset.tab).classList.add('activa');
@@ -3184,7 +3368,13 @@ function frasePaso(t, p, i) {
   if (e === 'pendiente') return 'Empieza cuando termine el paso anterior.';
   if (e === 'corriendo') return HACIENDO[c] || 'En curso.';
   if (e === 'omitido' && detenidoAntes(t, i)) return 'No se ejecutó: el proceso se detuvo antes.';
-  if (c === 'limpieza' && e !== 'error' && d.en_la_corrida != null) {
+  if (c === 'limpieza' && e === 'error') {
+    const otra = Object.entries(d.cuarentena_motivos || {}).filter(([m]) => m.split(' / ')[0] === OTRA_OPCION).reduce((a, [, n]) => a + n, 0);
+    if (otra) return plural(otra, 'imagen ya estaba guardada', 'imágenes ya estaban guardadas') + ' con la otra opción de descripciones y no se ' + (otra === 1 ? 'sustituyó' : 'sustituyeron') + '. No se creó ningún zip.';
+    if (d.cuarentena_total) return (d.cuarentena_total === 1 ? 'El único DICOM de la carpeta quedó' : 'Los ' + d.cuarentena_total + ' DICOM de la carpeta quedaron') + ' en cuarentena. No se creó ningún zip.';
+    return 'Ningún archivo de la carpeta quedó limpio. No se creó ningún zip.';
+  }
+  if (c === 'limpieza' && d.en_la_corrida != null) {
     let s = plural(d.en_la_corrida, 'archivo anonimizado', 'archivos anonimizados') + ', de ' + plural(d.pacientes, 'paciente', 'pacientes') + '.';
     if (d.omitidos_total) s += ' ' + plural(d.omitidos_total, 'archivo no es una imagen DICOM y se omitió', 'archivos no son imágenes DICOM y se omitieron') + '.';
     if (d.cuarentena_total) s += ' ' + plural(d.cuarentena_total, 'DICOM quedó en cuarentena, fuera del paquete', 'DICOM quedaron en cuarentena, fuera del paquete') + '.';
@@ -3234,6 +3424,8 @@ function cifraPaso(p) {
 function siguientePaso(t, p, i) {
   const d = p.datos || {}, e = p.estado, c = p.clave, k = d.clases || {};
   if (e === 'omitido' && detenidoAntes(t, i)) return 'Este paso se ejecutará cuando el proceso llegue hasta él. Corrige lo que detuvo el paso anterior y vuelve a pulsar Anonimizar carpeta.';
+  if (c === 'limpieza' && e === 'error' && Object.keys(d.cuarentena_motivos || {}).some(m => m.split(' / ')[0] === OTRA_OPCION))
+    return 'Esas imágenes se guardaron antes desde la pestaña Entrada, con la casilla de conservar descripciones marcada. El modo rápido limpia sin ella y no sustituye lo guardado. Siguen en la pestaña Estudios: desde allí se revisan, y desde Enviar se empaquetan.';
   if (c === 'limpieza' && e === 'error') return 'No se creó ningún zip. Si la carpeta no contiene imágenes CT, PET o MR, no hay nada que anonimizar; en otro caso, la salida del paso dice dónde se detuvo.';
   if (c === 'limpieza' && d.cuarentena_total) return 'Los DICOM en cuarentena son imágenes del estudio que quedan fuera del paquete; no son lo mismo que los archivos omitidos, que no eran imágenes. El reporte de la carpeta limpios_REPORTES dice el motivo de cada uno, sin valores.';
   if (c === 'compuerta' && e === 'error') return 'No se creó ningún zip. La salida del paso dice qué archivo y qué etiqueta; envíala a quien mantiene la aplicación. Los archivos limpios se quedan en esta computadora.';
@@ -3295,7 +3487,7 @@ function celdaFranja(sel, cls, ico, como, detalle) {
 function estadoProceso(t, s) {
   const p = s.procesamiento, pasos = t.pasos || [];
   if (p.estado === 'en_curso') return ['activo', 'curso', 'En curso, paso ' + (p.paso_en_curso || 1) + ' de ' + p.total, p.paso_en_curso ? 'Ahora: ' + pasos[p.paso_en_curso - 1].titulo.toLowerCase() + '.' : ''];
-  if (p.estado === 'detenido') return ['error', 'error', 'Detenido en el paso ' + (p.paso_detenido || '?'), (p.paso_detenido ? pasos[p.paso_detenido - 1].titulo + '. ' : '') + 'No se creó ningún zip.'];
+  if (p.estado === 'detenido') return ['error', 'error', p.paso_detenido ? 'Detenido en el paso ' + p.paso_detenido : 'Detenido', (p.paso_detenido ? pasos[p.paso_detenido - 1].titulo + '. ' : '') + 'No se creó ningún zip.'];
   const cuenta = p.correctos + ' de ' + p.total + ' comprobaciones correctas' + (p.con_aviso ? ', ' + p.con_aviso + ' con aviso' : '') + (p.no_evaluados ? ', ' + p.no_evaluados + ' sin evaluar' : '') + '.';
   return p.estado === 'terminado' && !p.no_evaluados ? ['ok', 'ok', 'Terminado', cuenta] : ['aviso', 'aviso', p.con_aviso ? 'Terminado con avisos' : 'Terminado', cuenta];
 }
@@ -3558,7 +3750,7 @@ function elegirSerieCorrida(i) {
   CORRIDA.indice = i; const s = CORRIDA.series[i];
   document.querySelectorAll('#rap-series button').forEach((b, j) => { b.classList.toggle('activa', j === i); b.setAttribute('aria-pressed', j === i ? 'true' : 'false'); });
   const d = $('#rap-deslizador'); d.min = 1; d.max = s.n; d.value = 1;
-  $('#rap-ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
+  $('#rap-ventana').value = s.modalidad === 'CT' ? 'tejido' : 'auto';
   pintarDemografia('#rap-etiqueta-estudio', '#rap-aviso-demografia', s.demografia);
   pintarAvanceCorrida(AVANCE_CORRIDA);
   mensaje('#rap-orden', s.criterio === 'desempate determinista' ? 'aviso' : 'neutro', 'Cortes ordenados por ' + (s.criterio || 'InstanceNumber') + (s.aviso ? ': ' + s.aviso : '') + '.');
@@ -3615,14 +3807,49 @@ $('#btn-demo').onclick = async () => {
   }
   catch (err) { mensaje('#aviso-origen', 'error', err.message); } finally { $('#btn-demo').disabled = false; }
 };
+// Lo que pasó en la limpieza, con sus cifras, y por qué quedó algo en cuarentena. Cada motivo dice qué pasó, a qué afecta
+// y qué se puede hacer. Las cifras y los motivos vienen del reporte de la limpieza.
+const OTRA_OPCION = 'misma instancia, ya guardada con la otra opción de descripciones';
+function explicarLimpieza(d, conservar) {
+  const zona = $('#explicacion-anon'); zona.textContent = ''; if (!d) return;
+  const dl = el('dl', 'ficha'); const fila = (dt, dd) => { if (dd == null) return; dl.appendChild(el('dt', null, dt)); dl.appendChild(el('dd', null, dd)); };
+  fila('Archivos leídos', d.leidos); fila('Guardados ahora', d.escritos); fila('Ya guardados, verificados', d.ya_guardados);
+  fila('Omitidos por no ser imágenes DICOM', d.omitidos_total); fila('DICOM en cuarentena', d.cuarentena_total);
+  zona.appendChild(dl);
+  for (const [motivo, n] of Object.entries(d.cuarentena_motivos || {})) {
+    const corto = motivo.split(' / ')[0], imagenes = plural(n, 'imagen', 'imágenes');
+    if (corto === OTRA_OPCION) zona.appendChild(cajaAviso('aviso', imagenes + (n === 1 ? ' ya estaba guardada' : ' ya estaban guardadas') + ' con la otra opción de descripciones', [
+      ['Qué pasó', (n === 1 ? 'Esa imagen ya estaba guardada, limpiada ' : 'Esas imágenes ya estaban guardadas, limpiadas ') + (conservar ? 'sin' : 'con') + ' la casilla de conservar descripciones. Ahora se ' + (n === 1 ? 'limpió ' : 'limpiaron ') + (conservar ? 'con' : 'sin') + ' ella, y el resultado solo difiere en esos textos.'],
+      ['A qué afecta', 'La copia guardada no cambió: sigue en Estudios como estaba, y la casilla no tuvo efecto en ' + (n === 1 ? 'esa imagen' : 'esas imágenes') + '. No se perdió ni se duplicó nada.'],
+      ['Qué puedes hacer', 'La casilla se aplica a los estudios que todavía no están guardados en esta carpeta de trabajo. Cambiarla en un estudio ya guardado todavía no se puede hacer desde la aplicación; si lo necesitas, escríbenos.'],
+    ]));
+    else if (corto === 'misma instancia SOP con contenido distinto') zona.appendChild(cajaAviso('aviso', imagenes + ' con otro contenido que la copia guardada', [
+      ['Qué pasó', 'En la carpeta hay otra copia de ' + (n === 1 ? 'una imagen ya guardada' : 'imágenes ya guardadas') + ', y no es igual a la guardada.'],
+      ['A qué afecta', 'La copia guardada no cambió y la nueva no se copió. Ninguna de las nuevas entra en un paquete.'],
+      ['Qué puedes hacer', 'Si las dos copias deberían ser la misma, compara las carpetas de origen. El reporte de la limpieza dice cuántas son.'],
+    ]));
+    else zona.appendChild(cajaAviso('aviso', plural(n, 'DICOM en cuarentena', 'DICOM en cuarentena') + ': ' + corto, [
+      ['Qué pasó', 'La limpieza apartó ' + (n === 1 ? 'esa imagen' : 'esas imágenes') + ' y no las copió. Motivo: ' + corto + '.'],
+      ['A qué afecta', 'No están en la copia limpia y no entran en ningún paquete. Los originales no se tocan.'],
+      ['Qué puedes hacer', 'El reporte de la limpieza, aquí abajo, dice cuántas son por motivo.'],
+    ]));
+  }
+  // solo si esta limpieza guardó o verificó algo: lo que quedó en cuarentena no se conserva, con redacción o sin ella
+  if (d.descripciones_redactadas && d.en_la_corrida) zona.appendChild(cajaAviso('aviso', 'Se redactó el nombre o el ID del paciente en una descripción', [
+    ['Qué pasó', 'Alguna descripción conservada contenía el nombre o el ID del paciente, y esa parte se sustituyó por [REDACTADO].'],
+    ['A qué afecta', 'Esas descripciones se conservan con la parte redactada. Lo demás no cambia.'],
+    ['Qué puedes hacer', 'Lee las descripciones en la pestaña Estudios antes de compartir: pueden decir algo más que la aplicación no reconoce.'],
+  ]));
+}
 $('#btn-anonimizar').onclick = async () => {
   const origen = $('#origen').value.trim();
   if (!origen) { mensaje('#aviso-origen', 'aviso', 'Elige o escribe la carpeta de originales.'); return; }
   $('#btn-anonimizar').disabled = true; $('#salida-anon').classList.remove('oculto'); texto('#salida-anon', ''); $('#det-reporte').classList.add('oculto');
+  const conservar = $('#conservar').checked; $('#explicacion-anon').textContent = '';
   const inicio = Date.now(); const reloj = () => { const s = Math.round((Date.now() - inicio) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
   mensaje('#estado-anon', 'neutro', 'limpieza en curso · 00:00');
   try {
-    const {trabajo} = await api('anonimizar', {origen, prefijo: $('#prefijo').value.trim(), conservar_descripciones: $('#conservar').checked});
+    const {trabajo} = await api('anonimizar', {origen, prefijo: $('#prefijo').value.trim(), conservar_descripciones: conservar});
     seguirTrabajo(trabajo, {
       cada: t => {
         texto('#salida-anon', t.lineas.join('\n'));
@@ -3641,6 +3868,7 @@ $('#btn-anonimizar').onclick = async () => {
         else if (t.estado === 'con avisos') mensaje('#estado-anon', 'aviso', 'Terminó con cuarentena o avisos en ' + reloj() + '. ' + listo.replace(/\s*\(done\)\s*$/, '') + '. Revisa el reporte antes de enviar.');
         else mensaje('#estado-anon', 'error', 'Terminó con error. Revisa la salida.');
         if (t.reporte) { $('#det-reporte').classList.remove('oculto'); texto('#reporte-anon', t.reporte); }
+        explicarLimpieza(t.datos, conservar);
         $('#btn-anonimizar').disabled = false; ACTUAL = null; $('#visor').classList.add('oculto'); SERIES = []; cargarEstudios(1);
       },
     });
@@ -3671,7 +3899,7 @@ async function cargarEstudios(refrescar) {
   texto('#resumen-estudios', SERIES.length + ' series, ' + new Set(SERIES.map(s => s.paciente)).size + ' paciente(s)');
   for (const s of SERIES) {
     const tr = document.createElement('tr'); tr.className = 'fila-serie';
-    celda(tr, s.paciente); celda(tr, demografiaCorta(s.demografia)); celda(tr, s.estudio); celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n, 'num');
+    celda(tr, s.paciente); celda(tr, demografiaCorta(s.demografia)); celda(tr, nombreEstudio(s)).title = s.estudio; celda(tr, s.serie); celda(tr, s.modalidad); celda(tr, s.descripcion); celda(tr, s.n, 'num');
     celda(tr, s.filas + '×' + s.columnas); const tdp = document.createElement('td'); tdp.appendChild(insignia(s.politica ? 'info' : 'error', s.politica || 'sin política')); tr.appendChild(tdp);
     tr.dataset.id = s.id; tr.onclick = () => abrir(s); tb.appendChild(tr);
   }
@@ -3688,10 +3916,10 @@ function abrir(s) {
   limpiarFormularioRevision(); cargarRevision(s.paciente); const d = $('#deslizador'); d.max = s.n - 1; d.value = Math.floor(s.n / 2);
   $('#antes-despues').classList.add('oculto'); $('#img-original').removeAttribute('src'); $('#img-limpio').removeAttribute('src'); $('#destacados').textContent = ''; $('#detalle-cambios').textContent = ''; texto('#ad-estado', '');
   $('#salida-comprobar').classList.add('oculto'); texto('#salida-comprobar', '');
-  $('#ventana').value = s.modalidad === 'PT' ? 'auto' : 'tejido';
+  $('#ventana').value = s.modalidad === 'CT' ? 'tejido' : 'auto';
   document.querySelectorAll('#botones-comprobar button[data-que=suv], #botones-comprobar button[data-que=comparar_suv]').forEach(b => { b.disabled = s.modalidad !== 'PT'; b.title = s.modalidad === 'PT' ? '' : 'Solo para series PET: elige la serie PT de este paciente'; });
   const m = $('#meta'); m.textContent = '';
-  for (const [k, v] of [['Paciente', s.paciente], ['Estudio', s.estudio], ['Serie', s.serie], ['Modalidad', s.modalidad], ['Descripción', s.descripcion], ['Protocolo', s.protocolo],
+  for (const [k, v] of [['Paciente', s.paciente], ['Estudio', nombreEstudio(s) + (s.estudio_numero ? ' (' + s.estudio + ')' : '')], ['Serie', s.serie], ['Modalidad', s.modalidad], ['Descripción', s.descripcion], ['Protocolo', s.protocolo],
        ['Matriz', s.filas + '×' + s.columnas], ['Espaciado (mm)', s.espaciado ? s.espaciado.join(' × ') : ''], ['Grosor (mm)', s.grosor ?? ''], ['Cortes', s.n], ['Política', s.politica]]) {
     const div = document.createElement('div'); const b = document.createElement('b'); b.textContent = k; div.appendChild(b); const val = document.createElement('span'); val.textContent = (v == null || v === '') ? '—' : String(v); div.appendChild(val); m.appendChild(div);
   }

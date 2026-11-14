@@ -267,3 +267,10 @@ details summary { cursor: pointer; font-size: var(--t-s); color: var(--tinta-2);
   .caja-aviso dt, .ficha dt { margin-top: var(--e-2); }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
+
+/* Entrada: la explicación de la casilla y del resultado de la limpieza. */
+details.ayuda { margin: 0 0 var(--e-3); font-size: var(--t-s); color: var(--tinta-2); }
+details.ayuda summary { cursor: pointer; color: var(--acento); width: max-content; }
+details.ayuda p { margin: var(--e-2) 0 0; max-width: 86ch; }
+#explicacion-anon .ficha { margin: var(--e-3) 0; grid-template-columns: 260px minmax(0, 1fr); font-variant-numeric: tabular-nums; }
+#explicacion-anon .caja-aviso { margin-bottom: var(--e-3); }

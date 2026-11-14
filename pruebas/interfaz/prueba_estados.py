@@ -69,8 +69,9 @@ def corrida(estados: list[str] | None = None, **cambios) -> dict:
     return t
 
 
-def series(n_series: int = 2, cortes: int = 96, cuadros: list[int] | None = None) -> list[dict]:
-    return [{"serie": f"ANON-0001/estudio_abc/serie_{i:02d}_{'CT' if i % 2 == 0 else 'PT'}_{i + 1:03d}", "modalidad": "CT" if i % 2 == 0 else "PT", "n": cortes,
+def series(n_series: int = 2, cortes: int = 96, cuadros: list[int] | None = None, modalidades: list[str] | None = None) -> list[dict]:
+    mod = lambda i: (modalidades or ["CT", "PT"])[i % len(modalidades or ["CT", "PT"])]
+    return [{"serie": f"ANON-0001_F/estudio_01_54a/serie_{i:02d}_{mod(i)}_{i + 1:03d}", "modalidad": mod(i), "n": cortes,
              "nombres": [f"corte_{k:06d}_{i:02d}aa.dcm" for k in range(1, cortes + 1)], "cuadros": (cuadros or [1] * cortes), "criterio": "InstanceNumber", "aviso": "",
              "demografia": {"etiqueta": "ANON-0001 · F · 54 años en el estudio", "sexo": {"estado": "registrado", "valor": "F"}, "edad_en_el_estudio": {"estado": "calculada"}}}
             for i in range(n_series)]
@@ -294,7 +295,29 @@ def main() -> int:
                     pag.screenshot(path=str(capturas / "estado-pantalla-estrecha.png"), full_page=True)
                 pag.set_viewport_size({"width": 1280, "height": 900})
 
+                # 11. la ventana de visualización por defecto: unidades Hounsfield solo para CT; automática para RM y PET
+                correr(corrida(), "Terminado", None, series(3, 4, modalidades=["MR", "CT", "PT"]))
+                ventana = lambda: pag.eval_on_selector("#rap-ventana", "el => el.value")
+                por_modalidad = {}
+                for indice, modalidad in enumerate(["MR", "CT", "PT"]):
+                    pag.locator("#rap-series button").nth(indice).click()
+                    por_modalidad[modalidad] = ventana()
+                ok(por_modalidad == {"MR": "auto", "CT": "tejido", "PT": "auto"}, f"ventana por defecto: automática para resonancia y PET, tejido blando para CT ({por_modalidad})")
+
+                # 12. la limpieza no aceptó ninguna imagen porque ya estaban guardadas con la otra opción de descripciones
+                otra = corrida(["error", "omitido", "omitido", "omitido", "omitido", "omitido"],
+                               mensaje="160 imagen(es) de esa carpeta ya están guardadas, limpiadas con la casilla de conservar descripciones; el modo rápido limpia sin ella y no sustituye la copia guardada; no se creó ningún zip.")
+                otra["pasos"][0]["datos"] = {"leidos": 160, "en_la_corrida": 0, "escritos": 0, "ya_guardados": 0, "actualizados": 0, "omitidos": {}, "omitidos_total": 0, "cuarentena_total": 160,
+                                             "cuarentena_motivos": {"misma instancia, ya guardada con la otra opción de descripciones / same instance, already stored with the other descriptions option": 160}, "pacientes": 1}
+                correr(otra, "Detenido en el paso 1", "limpieza-otra-opcion")
+                expect(paso("limpieza").locator(".paso-resumen")).to_contain_text("160 imágenes ya estaban guardadas con la otra opción de descripciones")
+                expect(paso("limpieza")).to_have_attribute("open", "")
+                expect(paso("limpieza").locator(".paso-detalle")).to_contain_text("Siguen en la pestaña Estudios")
+                expect(franja("paquete")).to_contain_text("No se creó")
+                ok("CT, PET o MR" not in texto_rapido(), "limpieza detenida por la opción de descripciones: se dice el motivo y dónde están las imágenes, sin preguntar si son CT, PET o MR")
+
                 # 10. si no se puede volver a comprobar, lo que queda en pantalla se marca como sin comprobar
+                correr(corrida(), "Terminado")
                 estado["cortar"] = True
                 pag.click("#btn-rap-comprobar")
                 expect(pag.locator("#rap-estado")).to_contain_text("No se pudo comprobar el estado de la corrida", timeout=20000)

@@ -9,10 +9,10 @@ Dentro de la carpeta de trabajo, cada archivo limpio conserva su nombre interno:
 En el zip, y en su manifiesto, cada archivo aparece con su ruta exportada:
 
 ```
-ANON-0001/estudio_cb168a224a/serie_98b54957b2_PT_002/corte_000002_6a1511f09c538af7.dcm
+ANON-0001_F/estudio_01_54a/serie_98b54957b2_PT_002/corte_000002_6a1511f09c538af7.dcm
 ```
 
-`corte_000002` es la posición del archivo dentro de su serie; el código que sigue es el nombre interno. Paciente, estudio y serie siguen en carpetas separadas, la numeración empieza en 1 en cada serie y lleva seis cifras, así el Finder y el Explorador de Windows ordenan bien también la serie de mil cortes. Ningún nombre original entra en la ruta.
+`corte_000002` es la posición del archivo dentro de su serie; el código que sigue es el nombre interno. La carpeta del paciente lleva el sexo registrado y la del estudio, su número y la edad en ese estudio, como explica `docs/carpetas-del-paquete.md`. Paciente, estudio y serie siguen en carpetas separadas, la numeración empieza en 1 en cada serie y lleva seis cifras, así el Finder y el Explorador de Windows ordenan bien también la serie de mil cortes. Ningún nombre original entra en la ruta.
 
 El número es un índice de presentación. No se escribe en `InstanceNumber` ni en ningún otro atributo: los bytes de cada DICOM son los mismos antes y después de exportar, y el manifiesto guarda su hash.
 

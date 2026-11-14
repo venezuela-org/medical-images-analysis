@@ -217,10 +217,13 @@ def test_una_corrida_muestra_identificador_sexo_y_edad_en_el_visor_y_en_el_manif
     assert d["etiqueta"] == "ANON-0001 · F · 53 años en el estudio"          # 5 de marzo, cumple el 10: todavía 53
     assert d["sexo"]["estado"] == "registrado" and d["edad_en_el_estudio"] == {**d["edad_en_el_estudio"], "estado": "calculada", "valor": 53, "unidad": "años"}
     m = manifiesto(t["zip"])
-    assert m["demografia"]["estudios"] == t["demografia"]                     # el manifiesto dice lo mismo que la corrida
+    sin_carpeta = [{k: v for k, v in e.items() if k not in ("carpeta", "numero")} for e in m["demografia"]["estudios"]]
+    assert sin_carpeta == t["demografia"]                                     # el manifiesto dice lo mismo que la corrida
+    assert m["demografia"]["estudios"][0]["carpeta"] == "ANON-0001_F/estudio_01_53a" and m["demografia"]["estudios"][0]["numero"] == 1
     por_estudio = {f"{x['paciente']}/{x['estudio']}": x for x in t["demografia"]}
     for s in t["series_corrida"]:                                             # y el visor de la corrida, por serie
-        assert por_estudio[s["serie"].rsplit("/", 1)[0]] == d
+        assert por_estudio[s["serie_interna"].rsplit("/", 1)[0]] == d
+        assert s["serie"].startswith("ANON-0001_F/estudio_01_53a/")           # que muestra la carpeta tal como va en el paquete
     app.indexar()                                                             # y la pestaña Estudios
     assert {s["etiqueta"] for s in app.INDICE.values()} == {d["etiqueta"]}
     assert all(s["demografia"] == d for s in app.INDICE.values())
