@@ -89,6 +89,18 @@ def main() -> int:
             expect(explicacion).to_contain_text("limpiadas sin la casilla de conservar descripciones")
             expect(explicacion).to_contain_text("La copia guardada no cambió")
             expect(explicacion).to_contain_text("DICOM en cuarentena")
+            # Una limpieza rechazada por el candado externo no hereda el reporte anterior.
+            candado_externo = trabajo / "limpios" / ".corriendo"
+            candado_externo.write_text("prueba", encoding="utf-8")
+            try:
+                pag.click("#btn-anonimizar")
+                expect(pag.locator("#estado-anon")).to_contain_text("Terminó con error", timeout=60000)
+                expect(explicacion).to_be_empty()
+                expect(pag.locator("#det-reporte")).to_be_hidden()
+                expect(pag.locator("#salida-anon")).to_contain_text(".corriendo")
+            finally:
+                candado_externo.unlink(missing_ok=True)
+            ok(True, "Entrada: una limpieza fallida no muestra las cifras ni el reporte de la anterior")
             pag.uncheck("#conservar")
             pag.click("nav.pestanas button[data-tab=estudios]")
             expect(pag.locator("#tabla-series tbody tr.fila-serie")).to_have_count(2)

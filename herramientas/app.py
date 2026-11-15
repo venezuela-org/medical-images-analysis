@@ -156,6 +156,9 @@ def dialogo_carpeta(para: str = "origen") -> str | None:
 def correr_en_segundo_plano(nombre: str, comando: list[str]) -> str:
     tid = secrets.token_hex(4)
     TRABAJOS[tid] = {"nombre": nombre, "estado": "corriendo", "lineas": [], "codigo": None}
+    id_reporte = secrets.token_hex(16) if nombre == "anonimizar" else None
+    if id_reporte:
+        comando = [*comando, "--id-corrida", id_reporte]
 
     def hilo() -> None:
         try:
@@ -167,6 +170,17 @@ def correr_en_segundo_plano(nombre: str, comando: list[str]) -> str:
         except OSError as e:
             TRABAJOS[tid]["lineas"].append(f"error: {type(e).__name__}")
             codigo = 2
+        if id_reporte:
+            # Captura antes de liberar el candado: una consulta tardía no puede tomar el reporte de otro trabajo.
+            TRABAJOS[tid]["datos"], TRABAJOS[tid]["reporte"] = None, ""
+            try:
+                r = json.loads((carpeta_reportes() / "ultimo_reporte.json").read_text(encoding="utf-8"))
+                if isinstance(r, dict) and r.get("id_corrida") == id_reporte:
+                    reporte = ANON.reporte_markdown(r)
+                    datos = datos_de_limpieza(reporte=r)
+                    TRABAJOS[tid]["datos"], TRABAJOS[tid]["reporte"] = datos, reporte
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass  # sin reporte verificable, nunca sustituirlo por uno anterior
         TRABAJOS[tid]["codigo"] = codigo
         TRABAJOS[tid]["estado"] = "ok" if codigo == 0 else ("con avisos" if codigo == 1 else "error")
         registrar(f"{nombre}: terminó con código {codigo}")
@@ -833,9 +847,6 @@ def trabajo(request: Request, tid: str):
     if t["estado"] != "corriendo" and t["nombre"] == "anonimizar" and not t.get("indexado"):
         indexar()
         t["indexado"] = True
-        rep = carpeta_reportes() / "ultimo_reporte.md"
-        t["reporte"] = rep.read_text(encoding="utf-8") if rep.exists() else ""
-        t["datos"] = datos_de_limpieza()                              # las cifras y los motivos, para explicar el resultado en pantalla
     out = {k: v for k, v in t.items() if k not in ("indexado", "archivos", "exportacion", "series_corrida", "servidos", "mostrados")}
     if t.get("nombre") == "rapido" and t.get("pasos"):
         out["situacion"] = situacion_de_corrida(t)
@@ -1361,14 +1372,16 @@ def clasificar_suv(codigo: int, informe: dict, salida: str) -> tuple[str, str]:
     return clasificar_suv_con_clase(codigo, informe, salida)[:2]
 
 
-def datos_de_limpieza(rels: list[str] | None = None) -> dict:
+def datos_de_limpieza(rels: list[str] | None = None, reporte: dict | None = None) -> dict:
     """Las cifras de la limpieza que acaba de terminar, tomadas de su reporte (no de sus frases): cuántos archivos se
     leyeron, cuántos entran en esta corrida, cuántos se omitieron por no ser imágenes DICOM y cuántos DICOM quedaron en
     cuarentena, con sus motivos. Solo recuentos y motivos genéricos; ningún nombre de archivo."""
-    try:
-        r = json.loads((carpeta_reportes() / "ultimo_reporte.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        r = {}
+    r = reporte
+    if r is None:
+        try:
+            r = json.loads((carpeta_reportes() / "ultimo_reporte.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            r = {}
     entero = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None
     omitidos = {str(k): v for k, v in (r.get("archivos_omitidos") or {}).items() if isinstance(v, int)} if isinstance(r.get("archivos_omitidos"), dict) else {}
     cuarentena = r.get("cuarentena") if isinstance(r.get("cuarentena"), list) else None

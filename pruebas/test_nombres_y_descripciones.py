@@ -383,3 +383,35 @@ def test_reporte_antiguo_no_infiere_redacciones_aceptadas(app):
     (reportes / "ultimo_reporte.json").write_text(json.dumps({
         "archivos_escritos": 1, "avisos": ["se redactó una descripción"]}), encoding="utf-8")
     assert app.datos_de_limpieza()["descripciones_redactadas"] is None
+
+
+def ejecutar_importacion(app, origen):
+    resultado = app.anonimizar(None, {"origen": str(origen)})
+    assert app.CANDADO.acquire(timeout=30), "la importación no terminó"
+    app.CANDADO.release()
+    return resultado["trabajo"]
+
+
+def test_importacion_fallida_no_muestra_el_reporte_anterior(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "auth", lambda request: None)
+    origen = caso(tmp_path, "A")
+    assert limpiar(origen, app.TRABAJO)[0] == 0
+    anterior = (app.carpeta_reportes() / "ultimo_reporte.json").read_bytes()
+    (app.TRABAJO / "limpios" / ".corriendo").write_text("candado externo", encoding="utf-8")
+    tid = ejecutar_importacion(app, origen)
+    t = app.trabajo(None, tid)
+    assert t["estado"] == "error" and t["codigo"] == 2
+    assert t.get("datos") is None and not t.get("reporte")
+    assert (app.carpeta_reportes() / "ultimo_reporte.json").read_bytes() == anterior
+
+
+def test_reporte_del_trabajo_se_conserva_aunque_se_consulte_despues_de_otro(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "auth", lambda request: None)
+    origen = caso(tmp_path, "A")
+    primero = ejecutar_importacion(app, origen)
+    segundo = ejecutar_importacion(app, origen)
+    # No se consulta el primero hasta que el segundo ya reemplazó ultimo_reporte.
+    a, b = app.trabajo(None, primero), app.trabajo(None, segundo)
+    assert a["datos"]["escritos"] == 6 and a["datos"]["ya_guardados"] == 0
+    assert b["datos"]["escritos"] == 0 and b["datos"]["ya_guardados"] == 6
+    assert a["reporte"] != b["reporte"]

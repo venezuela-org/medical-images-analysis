@@ -1285,6 +1285,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     reporte = {
         "version": VERSION, "politica": POLITICA, "prefijo": args.prefijo,
         "conservar_descripciones": bool(args.conservar_descripciones),
+        "id_corrida": getattr(args, "id_corrida", None),
         "fecha_ejecucion": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "archivos_leidos": len(archivos), "archivos_escritos": escritos, "duplicados_omitidos": duplicados,
         "actualizados_version": actualizados, "ya_anonimizados": ya_anonimizados,
@@ -1460,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("salida")
     a.add_argument("--mapa", help="ruta del mapa privado (private map path)")
     a.add_argument("--prefijo", default="ANON", help="prefijo de seudónimo, letras y dígitos (pseudonym prefix)")
+    a.add_argument("--id-corrida", help="identificador de la invocación para vincular su reporte")
     a.add_argument("--lista-salida", help="escribe aquí (JSON) las rutas limpias exactas que produjo o verificó esta invocación")
     a.add_argument("--conservar-descripciones", action="store_true",
                    help="conservar descripciones de estudio y serie y protocolo, revisadas contra nombre e ID (keep descriptions)")
