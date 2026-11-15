@@ -260,7 +260,9 @@ def main() -> int:
                 correr(corrida(), "Terminado")
                 pag.fill("#rap-destino", "/Users/demo/local")
                 pag.locator("#rap-destino").dispatch_event("change")
-                expect(pag.locator("#rap-estado")).to_contain_text("El destino de la corrida actual no cambia")
+                expect(pag.locator("#rap-destino-nota")).to_contain_text("Cambiar este campo no modifica la corrida actual")
+                pag.click("#btn-rap-comprobar")
+                expect(pag.locator("#rap-destino-nota")).to_contain_text("pulsa Anonimizar carpeta para iniciar otra")
                 ok(True, "cambiar el destino exige iniciar otra corrida y se explica en pantalla")
 
                 # 6. una corrida grande: resúmenes compactos, no miles de filas

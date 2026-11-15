@@ -3134,7 +3134,7 @@ HTML = """<!doctype html>
   <p class="suave frase">Un botón encadena seis comprobaciones y deja un zip en esta computadora. Mirar las imágenes sigue siendo tarea de una persona: el zip sale al destino cuando alguien declara, con su nombre, que las revisó.</p>
   <div class="rap-formulario">
     <div class="campo"><label for="rap-origen">Carpeta del estudio</label><div class="fila"><input type="text" id="rap-origen" placeholder="Carpeta del estudio, en el disco local"><button id="btn-rap-origen">Elegir carpeta...</button></div></div>
-    <div class="campo"><label for="rap-destino">Destino del zip revisado</label><div class="fila"><input type="text" id="rap-destino" placeholder="Dónde guardar el zip ya revisado"><button id="btn-rap-destino">Elegir destino...</button></div></div>
+    <div class="campo"><label for="rap-destino">Destino del zip revisado</label><div class="fila"><input type="text" id="rap-destino" aria-describedby="rap-destino-nota" placeholder="Dónde guardar el zip ya revisado"><button id="btn-rap-destino">Elegir destino...</button></div><p id="rap-destino-nota" class="suave">El destino queda fijado al iniciar cada corrida. Cambiar este campo no modifica la corrida actual: pulsa Anonimizar carpeta para iniciar otra con el nuevo destino.</p></div>
     <div class="fila accion"><button id="btn-rapido" class="primario">Anonimizar carpeta</button><span id="rap-reloj" class="terciario" aria-live="polite"></span></div>
   </div>
   <div id="rap-estado" aria-live="polite"></div>
@@ -3750,9 +3750,7 @@ function pintarAvanceCorrida(p) {
   b.title = porque; texto('#rap-porque', porque);
 }
 $('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
-const avisarDestinoFijado = () => { if (RAPIDO) mensaje('#rap-estado', 'aviso', 'El destino de la corrida actual no cambia. Pulsa Anonimizar carpeta para iniciar otra corrida con el nuevo destino.'); };
-$('#rap-destino').addEventListener('change', avisarDestinoFijado);
-$('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) { $('#rap-destino').value = r.ruta; avisarDestinoFijado(); } else mensaje('#rap-estado', 'aviso', r.mensaje); };
+$('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rapido').onclick = async () => {
   const origen = $('#rap-origen').value.trim();
   if (!origen) { mensaje('#rap-estado', 'aviso', 'Elige o escribe la carpeta del estudio.'); return; }
