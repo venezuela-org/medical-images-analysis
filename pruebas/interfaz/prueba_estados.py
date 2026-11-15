@@ -232,11 +232,36 @@ def main() -> int:
                 expect(franja("paquete")).to_contain_text("Publicado, con avisos")
                 expect(franja("paquete")).to_have_class(re.compile(r"\baviso\b"))
                 expect(franja("revision")).to_contain_text("Registrada")
-                expect(pag.locator("#rap-paquete-avisos")).to_contain_text("El zip está publicado; queda algo por atender")
+                expect(pag.locator("#rap-paquete-avisos")).to_contain_text("Evidencia pendiente de confirmación")
                 expect(pag.locator("#rap-paquete-avisos")).to_contain_text("nombre provisional")
                 expect(pag.locator("#rap-paquete-avisos")).to_contain_text("no se pudo eliminar de la carpeta de trabajo")
                 ok("no se publicó" not in texto_rapido().lower(), "publicado con avisos: se dice que está publicado y qué queda por atender, nunca que no se publicó")
                 expect(pag.locator("#rap-revision")).to_be_hidden()
+                expect(pag.locator("#rap-paquete-avisos")).to_contain_text("No los borres")
+                expect(pag.locator("#rap-paquete-avisos")).to_contain_text("Archivos temporales pendientes de eliminar")
+
+                # Una respuesta POST perdida no significa que la publicación fallara.
+                pendiente = corrida()
+                pendiente["progreso"] = copy.deepcopy(fallo["progreso"])
+                correr(pendiente, "Terminado")
+                def publicar_sin_respuesta(ruta):
+                    estado["trabajo"] = copy.deepcopy(pub)
+                    ruta.abort()
+                pag.route("**/api/rapido/revision", publicar_sin_respuesta)
+                pag.fill("#rap-revisor", "Revisora de Prueba")
+                expect(pag.locator("#btn-rap-revision")).to_be_enabled()
+                pag.click("#btn-rap-revision")
+                expect(pag.locator("#rap-estado")).to_contain_text("La consulta posterior confirma que la publicación ocurrió", timeout=20000)
+                expect(franja("revision")).to_contain_text("Registrada")
+                ok("no se registró" not in pag.inner_text("#rap-estado"), "respuesta perdida: se usa el estado confirmado por la consulta posterior")
+                pag.unroute("**/api/rapido/revision", publicar_sin_respuesta)
+
+                # El campo de destino prepara otra corrida, no redirige la actual.
+                correr(corrida(), "Terminado")
+                pag.fill("#rap-destino", "/Users/demo/local")
+                pag.locator("#rap-destino").dispatch_event("change")
+                expect(pag.locator("#rap-estado")).to_contain_text("El destino de la corrida actual no cambia")
+                ok(True, "cambiar el destino exige iniciar otra corrida y se explica en pantalla")
 
                 # 6. una corrida grande: resúmenes compactos, no miles de filas
                 grande = corrida()
@@ -317,11 +342,18 @@ def main() -> int:
                 ok("CT, PET o MR" not in texto_rapido(), "limpieza detenida por la opción de descripciones: se dice el motivo y dónde están las imágenes, sin preguntar si son CT, PET o MR")
 
                 # 10. si no se puede volver a comprobar, lo que queda en pantalla se marca como sin comprobar
-                correr(corrida(), "Terminado")
+                correr(pub, "Terminado")
                 estado["cortar"] = True
                 pag.click("#btn-rap-comprobar")
                 expect(pag.locator("#rap-estado")).to_contain_text("No se pudo comprobar el estado de la corrida", timeout=20000)
                 expect(pag.locator("#rap-franja")).to_have_class(re.compile(r"\bcaduco\b"))
+                expect(pag.locator("#rap-frescura")).to_contain_text("resumen histórico")
+                expect(pag.locator("#rap-resumen")).not_to_contain_text("Registrada y vigente")
+                expect(pag.locator("#rap-resumen")).not_to_contain_text("comprobado ahora")
+                pag.evaluate("Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText: async t => {window.reciboCopiado=t;}}})")
+                pag.click("#btn-rap-copiar")
+                pag.wait_for_function("window.reciboCopiado && window.reciboCopiado.startsWith('SIN COMPROBAR')")
+                expect(pag.locator("#btn-rap-revision")).to_be_disabled()
                 estado["cortar"] = False
                 pag.click("#rap-estado button.reintentar")
                 expect(pag.locator("#rap-franja")).not_to_have_class(re.compile(r"\bcaduco\b"), timeout=20000)

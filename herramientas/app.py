@@ -760,37 +760,63 @@ def situacion_de_corrida(t: dict) -> dict:
         revision = {"estado": "no_verificable", "problemas": retiradas["problemas"], "habia_registro": bool(t.get("revisado"))}
     elif t.get("revisado"):
         canonico = nombre_canonico(Path(str(t.get("registro_revision") or "")).name)
-        ruta = ruta_de_registro_de_corrida(canonico) if REGISTRO_RAPIDO_RE.match(canonico) else None
+        esperada = t.get("registro_revision_sha256")
+        ruta = datos = r = None
         try:
+            ruta = ruta_de_registro_de_corrida(canonico) if REGISTRO_RAPIDO_RE.match(canonico) else None
             datos = ruta.read_bytes() if ruta else None
             r = json.loads(datos.decode("utf-8")) if datos is not None else None
         except (OSError, ValueError):
-            datos = r = None
-        if not isinstance(r, dict):
-            revision = {"estado": "registro_no_legible", "registro": canonico or None}
-        else:
-            try:
-                diario = retirada_que_cubre("corrida", canonico, hashlib.sha256(datos).hexdigest())
-            except RetiradasNoVerificables as e:
-                diario, revision = None, {"estado": "no_verificable", "problemas": e.problemas, "habia_registro": True}
-            if revision["estado"] != "no_verificable":
-                revision = {"estado": "retirada" if diario else "registrada", "revisor": r.get("revisor"), "fecha": r.get("fecha"),
-                            "declaracion": "sin_hallazgos", "mostrado": r.get("mostrado"), "registro": canonico, "registro_provisional": ruta.name != canonico}
-                if diario:
-                    revision["retirada"] = diario["retirada"]
-                    revision["inventario_de_paquetes"] = resumen_de_inventario(diario)
+            pass
+        # La identidad es la que se escribió ANTES de publicar, nunca la de un archivo sustituto.
+        try:
+            diario = retirada_que_cubre("corrida", canonico, esperada) if esperada else None
+        except RetiradasNoVerificables as e:
+            diario, revision = None, {"estado": "no_verificable", "problemas": e.problemas, "habia_registro": True}
+        if revision["estado"] != "no_verificable":
+            retirada = diario["retirada"] if diario else t.get("revision_retirada")
+            valida = (isinstance(r, dict) and bool(esperada) and datos is not None
+                      and hashlib.sha256(datos).hexdigest() == esperada
+                      and r.get("estado") == "sin_hallazgos" and r.get("hallazgos") == []
+                      and bool(r.get("revisor")) and bool(r.get("fecha"))
+                      and r.get("archivos") == t.get("archivos") and r.get("pacientes") == t.get("pacientes"))
+            if retirada:
+                declaracion = t.get("revision_declarada") or {}
+                revision = {"estado": "retirada", "registro": canonico, "retirada": retirada,
+                            "revisor": declaracion.get("revisor"), "fecha": declaracion.get("fecha"),
+                            "mostrado": declaracion.get("mostrado"), "declaracion": "sin_hallazgos",
+                            "inventario_de_paquetes": resumen_de_inventario(diario) if diario else None}
+            elif not valida:
+                revision = {"estado": "registro_no_legible", "registro": canonico or None}
+            else:
+                revision = {"estado": "registrada", "revisor": r["revisor"], "fecha": r["fecha"],
+                            "declaracion": "sin_hallazgos", "mostrado": r.get("mostrado"), "registro": canonico,
+                            "registro_provisional": ruta.name != canonico}
     revision["cuadros_mostrados"], revision["cuadros_totales"] = avance["mostrados"], avance["total"]
     revision["no_mostrables"] = len(t.get("no_mostrables") or [])
 
     zip_ruta = Path(str(t["zip"]))
+    existe, mismo = None, None
     try:
         existe = zip_ruta.is_file()
+        if existe and t.get("zip_sha256"):
+            mismo = sha256_archivo(zip_ruta) == t["zip_sha256"]
     except OSError:
-        existe = None                                                 # no se pudo mirar: ni sí ni no
+        pass                                                        # presencia e integridad son comprobaciones distintas
     publicacion = t.get("publicacion") or {}
-    pendientes = [{"clase": "evidencia", "texto": a} for a in publicacion.get("avisos_posteriores", [])] + \
-                 [{"clase": "limpieza", "texto": "no se pudo eliminar de la carpeta de trabajo: " + x} for x in publicacion.get("pendiente_anterior_no_eliminado", [])]
-    paquete = {"estado": ("publicado" if t.get("revisado") else "pendiente_local") if existe else ("no_encontrado" if existe is False else "no_comprobable"),
+    pendientes = []
+    for accion in publicacion.get("acciones", []):
+        ruta = accion.get("ruta")
+        if ruta:
+            try:
+                if not Path(ruta).exists():
+                    continue
+            except OSError:
+                pass                                                # no ocultar una acción si no se puede comprobar
+        pendientes.append(dict(accion))
+    estado_zip = ("publicado" if t.get("revisado") else "pendiente_local") if mismo else (
+        "modificado" if mismo is False else ("no_encontrado" if existe is False else "no_comprobable"))
+    paquete = {"estado": estado_zip, "es_el_mismo_archivo": mismo,
                "ruta": str(zip_ruta), "existe": existe, "con_revision_registrada": bool(t.get("revisado")),
                "destino": t.get("destino"), "destino_sincronizado": t.get("destino_sincronizado") or None,
                "archivos": len(t.get("archivos") or {}), "pacientes": list(t.get("pacientes") or []),
@@ -1218,18 +1244,20 @@ def crear_paquete(pacientes: list[str], destino_dir: Path | None = None, limpiez
         raise PaqueteRechazado(500, {"detail": f"falló {etapa}; el zip no se publicó / package not published", "restos": restos})
 
     # 5. después de publicar ya no hay errores, solo avisos: la ruta publicada se conserva pase lo que pase
-    avisos = []
+    avisos, temporales_no_eliminados = [], []
     try:
         os.replace(manifiesto_preparado, manifiesto_local)      # la evidencia preparada pasa a confirmada
     except OSError:
         manifiesto_local = manifiesto_preparado
         avisos.append(f"el manifiesto local quedó con su nombre provisional aunque el zip está publicado: {manifiesto_preparado}")
     if not es_local and not _eliminar(tmp):
+        temporales_no_eliminados.append(str(tmp))
         avisos.append(f"no se pudo eliminar el zip temporal de la carpeta de trabajo: {tmp}")
     registrar(f"empaquetar: {nombre} con {len(entradas)} archivos de {', '.join(pacientes)}; revisión de píxeles pendiente: {', '.join(pendientes) or 'ninguno'}"
               + (f"; avisos: {len(avisos)}" if avisos else ""))
     return {"ruta": str(final), "archivos": len(entradas), "pacientes": pacientes, "revision_pixeles_pendiente": pendientes,
             "hashes": {rel: h for _, _, h, rel in entradas}, "sha256": huella, "manifiesto_local": str(manifiesto_local), "avisos": avisos,
+            "temporales_no_eliminados": temporales_no_eliminados,
             "retiradas_no_verificables": retiradas["problemas"] if retiradas["bloqueo"] else [],
             "demografia": demografia, "exportacion": dict(exportacion), "orden_sin_verificar": sorted(serie for serie, o in orden_series.items() if o and o["criterio"] == CRITERIO_DESEMPATE)}
 
@@ -1518,7 +1546,7 @@ def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
         except PaqueteRechazado as e:
             paso("paquete", "error", "el paquete no se creó", json.dumps(e.cuerpo, ensure_ascii=False)[:3000], {"clase": "no_creado"})
             return terminar("error", "El paquete no se creó." + texto_restos(e.cuerpo.get("restos", [])))
-        t["zip"], t["archivos"] = r["ruta"], r["hashes"]
+        t["zip"], t["archivos"], t["zip_sha256"] = r["ruta"], r["hashes"], r["sha256"]
         t["retiradas_no_verificables"] = r.get("retiradas_no_verificables", [])
         t["no_mostrables"] = []
         comprobar_que_se_puede_mostrar(t)
@@ -1825,6 +1853,8 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
             _escribir_json(registro_preparado, {**revision, "app": VERSION, "pacientes": t["pacientes"], "archivos": t["archivos"],
                                                 "zip": {"nombre": info["nombre"], "destino": str(destino), "sha256": info["sha256"]},
                                                 "nota": f"Se escribe antes de publicar el zip. Con el sufijo {SUFIJO_PREPARADO} no acredita ninguna publicación; al confirmarse la publicación el archivo pierde ese sufijo."})
+            t["registro_revision_sha256"] = sha256_archivo(registro_preparado)
+            t["revision_declarada"] = copy.deepcopy(revision)
 
         try:
             r = crear_paquete(t["pacientes"], destino, solo=set(t["archivos"]), revision_corrida=revision,
@@ -1849,6 +1879,8 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
         t["zip_pendiente_anterior"] = t["zip"]
         anterior = Path(t["zip"])
         t["zip"], t["revision_pixeles_pendiente"], t["revisado"] = r["ruta"], r["revision_pixeles_pendiente"], True
+        t["zip_sha256"] = r["sha256"]
+        acciones = []
         avisos_posteriores = list(r.get("avisos", []))
         registro_confirmado = True
         try:
@@ -1857,6 +1889,12 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
             registro_confirmado, registro_revision = False, registro_preparado
             avisos_posteriores.append(f"el registro de la revisión quedó con su nombre provisional aunque el zip está publicado: {registro_preparado}")
         t["registro_revision"] = str(registro_revision)
+        for ruta in (registro_revision, Path(r["manifiesto_local"])):
+            if ruta.name.endswith(SUFIJO_PREPARADO):
+                acciones.append({"clase": "evidencia", "ruta": str(ruta),
+                                 "texto": f"evidencia con nombre provisional; conservar y confirmar desde Registro: {ruta}"})
+        for ruta in r.get("temporales_no_eliminados", []):
+            acciones.append({"clase": "limpieza", "ruta": ruta, "texto": "temporal sin eliminar: " + ruta})
         cubiertos = []
         for pac in t["pacientes"]:
             try:   # la revisión del paciente completo solo se actualiza si la corrida cubre todos sus archivos guardados
@@ -1867,12 +1905,15 @@ def aplicar_revision_rapido(t: dict, revisor: str) -> dict:
                                      origen={"corrida": nombre_canonico(Path(registro_revision).name)}, mostrado=revision["mostrado"], archivos=actuales)
                     cubiertos.append(pac)
             except Exception as e:
-                avisos_posteriores.append(f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); el zip publicado y su registro no cambian")
+                aviso = f"no se pudo actualizar la revisión de {pac} en Estudios ({type(e).__name__}); consulta Registro"
+                avisos_posteriores.append(aviso)
+                acciones.append({"clase": "revision_paciente", "texto": aviso})
         no_eliminados = [str(v) for v in (anterior, anterior.with_name(anterior.name[:-4] + ".manifiesto.json"))
                          if v.resolve() != Path(r["ruta"]).resolve() and not _eliminar(v)]
+        acciones.extend({"clase": "limpieza", "ruta": ruta, "texto": "pendiente anterior sin eliminar: " + ruta} for ruta in no_eliminados)
         hay_avisos = any(p_["estado"] == "aviso" for p_ in t["pasos"])
         # Lo ocurrido al publicar se guarda en la corrida: la pantalla lo vuelve a leer en cada consulta, no solo una vez.
-        t["publicacion"] = {"fecha": revision["fecha"], "registro_confirmado": registro_confirmado, "avisos_posteriores": list(avisos_posteriores),
+        t["publicacion"] = {"acciones": acciones, "fecha": revision["fecha"], "registro_confirmado": registro_confirmado, "avisos_posteriores": list(avisos_posteriores),
                             "pendiente_anterior_no_eliminado": list(no_eliminados), "revision_de_paciente_actualizada": list(cubiertos)}
         t.pop("publicacion_fallida", None)
         t["mensaje"] = "Zip revisado y guardado en el destino." + (" Hay avisos en los pasos de arriba." if hay_avisos else "")
@@ -3106,6 +3147,7 @@ HTML = """<!doctype html>
   <div id="rap-area-resumen" class="area oculto">
     <h3>Resumen de la corrida</h3>
     <p class="suave frase">Lo que consta de esta corrida, en tres partes. Es una lectura de los registros de la aplicación; el manifiesto del zip y los registros de revisión siguen siendo la fuente.</p>
+    <p id="rap-frescura" class="terciario" aria-live="polite"></p>
     <div id="rap-resumen" class="resumen"></div>
     <div class="fila"><button id="btn-rap-copiar">Copiar resumen</button><button id="btn-rap-comprobar">Volver a comprobar</button><span id="rap-comprobado" class="terciario" aria-live="polite"></span></div>
     <textarea id="rap-copia" class="oculto" rows="8" readonly aria-label="Resumen de la corrida, para copiar"></textarea>
@@ -3314,7 +3356,7 @@ function recorrido(boton, img, avanzar) {
   boton.onclick = () => { if (activo) return parar(); activo = true; boton.textContent = 'Detener'; setTimeout(paso, 300); };
   return parar;
 }
-let RAPIDO = null, BLOQUEO_REVISION = false, AVANCE_CORRIDA = null, ULTIMA = null, COMPROBADO = null;
+let RAPIDO = null, BLOQUEO_REVISION = false, AVANCE_CORRIDA = null, ULTIMA = null, COMPROBADO = null, VIGENTE = false, REGISTRANDO = false, CONSULTA = 0;
 const ABIERTOS = new Set();
 // ---- piezas pequeñas: iconos en línea (ningún recurso externo), elementos y plurales ----
 const TRAZOS = {
@@ -3504,7 +3546,8 @@ function estadoPaquete(s) {
   const q = s.paquete, r = s.revision;
   if (q.estado === 'no_creado') return s.procesamiento.estado === 'detenido' ? ['error', 'error', 'No se creó', 'El proceso se detuvo antes de crearlo.'] : ['neutro', 'espera', 'Todavía no existe', 'Se crea en el paso 6, en esta computadora.'];
   if (q.estado === 'no_encontrado') return ['aviso', 'aviso', 'No está donde se dejó', 'El zip ya no está en la carpeta en la que la aplicación lo escribió.'];
-  if (q.estado === 'no_comprobable') return ['error', 'error', 'No se pudo comprobar', 'No se pudo mirar la carpeta del zip.'];
+  if (q.estado === 'modificado') return ['error', 'error', 'El zip cambió', 'El archivo ya no coincide con el paquete publicado; no lo compartas como revisado.'];
+  if (q.estado === 'no_comprobable') return ['error', 'error', 'No se pudo comprobar', 'No se pudo verificar la integridad del zip.'];
   if (q.estado === 'pendiente_local') return q.ultimo_intento_fallido ? ['error', 'paquete', 'Creado, sin publicar', 'El último intento de publicarlo falló. Sigue en esta computadora.']
     : ['aviso', 'paquete', 'Creado, sin publicar', 'Está en esta computadora. Aún no ha llegado al destino.'];
   if (r.estado === 'retirada') return ['aviso', 'paquete', 'Publicado; revisión retirada', 'El zip sigue en el destino y ya no debe compartirse.'];
@@ -3524,7 +3567,7 @@ function pintarAreaRevision(t, s) {
     registrada: 'Registrada. ' + (r.revisor || '') + ' declaró el ' + fechaLegible(r.fecha) + ' que revisó todos los cortes, sin hallazgos. Este registro deja constancia de esa declaración; el permiso para compartir los datos lo da tu institución.',
     retirada: 'Retirada. La declaración que había ya no vale en la aplicación.',
     no_verificable: 'No se puede saber ahora si la revisión de esta corrida vale.',
-    registro_no_legible: 'El registro de la revisión de esta corrida no se puede leer, así que no se da por vigente.',
+    registro_no_legible: 'El registro de la revisión falta, no se puede leer o cambió; no se da por vigente.',
   };
   texto('#rap-revision-frase', frases[r.estado] || '');
   if (r.estado === 'no_verificable') {
@@ -3536,7 +3579,7 @@ function pintarAreaRevision(t, s) {
     ], [['Volver a comprobar', comprobarCorrida, 'primario'], ['Abrir Registro', irARegistro]]));
   }
   if (r.estado === 'registro_no_legible') zona.appendChild(cajaAviso('error', 'No se puede leer el registro de la revisión', [
-    ['Qué pasó', 'El archivo del registro' + (r.registro ? ' ' + r.registro : '') + ' no está o no se puede leer.'],
+    ['Qué pasó', 'El archivo del registro' + (r.registro ? ' ' + r.registro : '') + ' no está, no se puede leer o no coincide con la evidencia de esta corrida.'],
     ['A qué afecta', 'Sin ese registro la aplicación no puede decir que esta corrida esté revisada. El zip publicado no cambia.'],
     ['Qué puedes hacer', 'Mira en Registro si la revisión aparece allí y vuelve a comprobar. Si el archivo se perdió, ejecuta de nuevo el modo rápido sobre la carpeta y revisa.'],
   ], [['Volver a comprobar', comprobarCorrida, 'primario'], ['Abrir Registro', irARegistro]]));
@@ -3564,7 +3607,8 @@ function pintarAreaPaquete(t, s) {
   const [cls, ico, como] = estadoPaquete(s);
   const frase = q.estado === 'pendiente_local' ? 'El zip existe y está completo, con la revisión marcada como pendiente en su manifiesto. Se queda en la carpeta de trabajo hasta que se registre la revisión.'
     : q.estado === 'publicado' ? (r.estado === 'registrada' ? 'El zip con la revisión registrada está en la carpeta de destino.' : 'El zip está en la carpeta de destino; lee el estado de su revisión antes de compartirlo.')
-    : q.estado === 'no_encontrado' ? 'La aplicación escribió el zip, pero ya no lo encuentra en esa carpeta. Puede haberse movido o borrado.' : 'No se pudo comprobar si el zip sigue en su carpeta.';
+    : q.estado === 'no_encontrado' ? 'La aplicación escribió el zip, pero ya no lo encuentra en esa carpeta. Puede haberse movido o borrado.'
+    : q.estado === 'modificado' ? 'El archivo en esa ruta cambió desde su creación. No corresponde al paquete verificado; no lo compartas como revisado.' : 'No se pudo verificar que el zip siga siendo el paquete creado por esta corrida.';
   texto('#rap-paquete-frase', frase);
   const estadoEl = el('span', 'paso-estado ' + cls); estadoEl.appendChild(icono(ico)); estadoEl.appendChild(el('span', null, como));
   const dl = $('#rap-paquete-ficha'); dl.textContent = '';
@@ -3576,15 +3620,27 @@ function pintarAreaPaquete(t, s) {
   if (q.destino_sincronizado) zona.appendChild(cajaAviso('aviso', 'El destino está sincronizado con la nube', [
     ['Qué pasó', 'La carpeta de destino pertenece a ' + q.destino_sincronizado + '.'],
     ['A qué afecta', 'Lo que se escriba allí puede subirse solo. La aplicación solo escribe en ese destino el zip ya revisado.'],
-    ['Qué puedes hacer', 'Si prefieres decidir tú cuándo sale, elige un destino en el disco local antes de registrar la revisión.']]));
+    ['Qué puedes hacer', 'El destino de esta corrida está fijado. Para usar otra carpeta, elige el nuevo destino y pulsa Anonimizar carpeta para iniciar una nueva corrida; cambiar el campo no modifica esta corrida.']]));
   if (q.ultimo_intento_fallido && q.estado === 'pendiente_local') zona.appendChild(cajaAviso('error', 'El zip revisado no se publicó', [
     ['Qué pasó', q.ultimo_intento_fallido.detalle],
     ['A qué afecta', 'En el destino no se escribió ningún zip y la revisión no quedó registrada. El zip pendiente sigue en la carpeta de trabajo.'],
     ['Qué puedes hacer', (q.ultimo_intento_fallido.restos || []).length ? 'Borra a mano los archivos intermedios que se indican y vuelve a registrar la revisión.' : 'Corrige la causa y vuelve a registrar la revisión.']]));
-  if (q.acciones_pendientes.length) { const ul = el('ul'); for (const a of q.acciones_pendientes) ul.appendChild(el('li', null, a.texto));
-    zona.appendChild(cajaAviso('aviso', 'El zip está publicado; queda algo por atender', [
-      ['Qué pasó', ul], ['A qué afecta', 'El zip publicado y su revisión valen. Lo pendiente es de orden: un nombre provisional, o un archivo de trabajo que no se pudo borrar.'],
-      ['Qué puedes hacer', 'Borra a mano los archivos que se indican. Un registro con nombre provisional se confirma solo al volver a abrir la aplicación o desde Registro.']], [['Abrir Registro', irARegistro]])); }
+  if (q.acciones_pendientes.length) {
+    const evidencias = q.acciones_pendientes.filter(a => a.clase === 'evidencia');
+    const limpieza = q.acciones_pendientes.filter(a => a.clase === 'limpieza');
+    const otras = q.acciones_pendientes.filter(a => !['evidencia', 'limpieza'].includes(a.clase));
+    const lista = acciones => { const ul = el('ul'); for (const a of acciones) ul.appendChild(el('li', null, a.texto)); return ul; };
+    const vigencia = r.estado === 'registrada' ? 'La revisión consta registrada; comprueba también el estado del zip.'
+      : 'Estas acciones no restablecen una revisión retirada o no verificable. Lee su estado antes de compartir.';
+    if (evidencias.length) zona.appendChild(cajaAviso('aviso', 'Evidencia pendiente de confirmación', [
+      ['Qué pasó', lista(evidencias)], ['A qué afecta', vigencia],
+      ['Qué puedes hacer', 'Conserva estos archivos: son evidencia de la publicación. No los borres. Abre Registro para intentar confirmar su nombre provisional.']], [['Abrir Registro', irARegistro]]));
+    if (limpieza.length) zona.appendChild(cajaAviso('aviso', 'Archivos temporales pendientes de eliminar', [
+      ['Qué pasó', lista(limpieza)], ['A qué afecta', vigencia],
+      ['Qué puedes hacer', 'Puedes borrar únicamente los temporales enumerados en este recuadro. No borres registros ni manifiestos de evidencia.']]));
+    if (otras.length) zona.appendChild(cajaAviso('aviso', 'Actualización de registros pendiente', [
+      ['Qué pasó', lista(otras)], ['A qué afecta', vigencia], ['Qué puedes hacer', 'Consulta Registro. No borres archivos para resolver este aviso.']], [['Abrir Registro', irARegistro]]));
+  }
 }
 function columnaResumen(titulo, cls, ico, filas) {
   const c = el('div'); const h = el('h4', cls); h.appendChild(icono(ico)); h.appendChild(el('span', null, titulo)); c.appendChild(h);
@@ -3593,6 +3649,7 @@ function columnaResumen(titulo, cls, ico, filas) {
 function pintarResumen(t, s) {
   const terminado = s.procesamiento.estado !== 'en_curso';
   $('#rap-area-resumen').classList.toggle('oculto', !terminado); if (!terminado) return;
+  texto('#rap-frescura', VIGENTE ? 'Estado verificado en la última consulta.' : 'Sin comprobar: resumen histórico; el estado actual puede haber cambiado.');
   const cont = $('#rap-resumen'); cont.textContent = '';
   const limp = ((t.pasos || []).find(x => x.clave === 'limpieza') || {}).datos || {}, r = s.revision, q = s.paquete;
   const [pc, pi, pt, pd] = estadoProceso(t, s), [rc, ri, rt] = estadoRevision(s), [qc, qi, qt] = estadoPaquete(s);
@@ -3606,7 +3663,7 @@ function pintarResumen(t, s) {
   ]));
   const mostrados = r.mostrado ? r.mostrado.cuadros_mostrados + ' de ' + r.mostrado.cuadros_totales : (r.cuadros_totales != null ? r.cuadros_mostrados + ' de ' + r.cuadros_totales : null);
   cont.appendChild(columnaResumen('Revisión de píxeles', rc, ri, [
-    ['Estado, comprobado ahora', {sin_paquete: 'No hay paquete que revisar', pendiente: 'Pendiente: nadie la ha declarado', registrada: 'Registrada y vigente', retirada: 'Retirada', no_verificable: 'No se puede verificar', registro_no_legible: 'Registro ilegible: no se da por vigente'}[r.estado]],
+    [VIGENTE ? 'Estado, comprobado ahora' : 'Último estado conocido (sin comprobar)', {sin_paquete: 'No hay paquete que revisar', pendiente: 'Pendiente: nadie la ha declarado', registrada: VIGENTE ? 'Registrada y vigente' : 'Registrada en la última comprobación', retirada: 'Retirada', no_verificable: 'No se puede verificar', registro_no_legible: 'Registro ilegible: no se da por vigente'}[r.estado]],
     ['Declaración', r.estado === 'registrada' || r.estado === 'retirada' ? '«Revisé todos los cortes: sin hallazgos»' : null],
     ['Quién y cuándo', r.revisor ? r.revisor + ' · ' + fechaLegible(r.fecha) : null],
     ['Retirada', r.retirada ? r.retirada.quien + ' · ' + fechaLegible(r.retirada.fecha) + ' · ' + r.retirada.motivo : null],
@@ -3619,7 +3676,7 @@ function pintarResumen(t, s) {
     ['Ubicación', q.ruta || null, 'mono'],
     ['Acciones pendientes', q.estado === 'no_creado' ? null : (q.acciones_pendientes.length ? plural(q.acciones_pendientes.length, 'pendiente', 'pendientes') + ': mira el apartado Paquete' : (q.estado === 'publicado' ? 'Ninguna' : 'Registrar la revisión de píxeles'))],
   ]));
-  texto('#rap-comprobado', COMPROBADO ? 'Comprobado a las ' + COMPROBADO.toLocaleTimeString('es', {hour: '2-digit', minute: '2-digit', second: '2-digit'}) + '.' : '');
+  texto('#rap-comprobado', COMPROBADO ? (VIGENTE ? 'Comprobado a las ' : 'Sin comprobar ahora. Última consulta correcta a las ') + COMPROBADO.toLocaleTimeString('es', {hour: '2-digit', minute: '2-digit', second: '2-digit'}) + '.' : '');
 }
 // El texto que se copia sale de una lista cerrada de campos: estados, cifras y versiones. Ni rutas, ni nombres de archivo,
 // ni el nombre de quien revisó, ni la etiqueta del estudio, ni la salida de los pasos.
@@ -3633,10 +3690,11 @@ function textoResumen(t, s) {
   if (r.cuadros_totales != null) lineas.push('  Cuadros mostrados en el navegador: ' + (r.mostrado ? r.mostrado.cuadros_mostrados + ' de ' + r.mostrado.cuadros_totales : r.cuadros_mostrados + ' de ' + r.cuadros_totales) + ' (mostrado no significa revisado).');
   lineas.push('', 'Paquete: ' + (q.estado === 'no_creado' ? 'no se creó' : estadoPaquete(s)[2]) + '.' + (q.archivos ? ' ' + plural(q.archivos, 'archivo DICOM', 'archivos DICOM') + '.' : '') + (q.acciones_pendientes && q.acciones_pendientes.length ? ' Acciones pendientes: ' + q.acciones_pendientes.length + '.' : ''));
   lineas.push('', 'Estado comprobado: ' + fechaLegible(s.comprobado) + '. Este resumen describe registros de la aplicación; no certifica el anonimato ni autoriza a compartir.');
+  if (!VIGENTE) lineas.unshift('SIN COMPROBAR: resumen histórico. No se pudo verificar el estado actual; puede haber cambiado.', '');
   return lineas.join('\n');
 }
 function pintarCorrida(t) {
-  ULTIMA = t; COMPROBADO = new Date();
+  ULTIMA = t; COMPROBADO = new Date(); VIGENTE = true;
   const s = t.situacion; if (!s) return;
   $('#rap-franja').classList.remove('oculto', 'caduco'); $('#rap-area-proceso').classList.remove('oculto');
   celdaFranja('#rap-f-proceso', ...estadoProceso(t, s)); celdaFranja('#rap-f-revision', ...estadoRevision(s)); celdaFranja('#rap-f-paquete', ...estadoPaquete(s));
@@ -3651,14 +3709,22 @@ function pintarCorrida(t) {
 // Vuelve a preguntar al servidor por el estado de la corrida. Si no contesta, lo que hay en pantalla se marca como sin
 // comprobar: un resumen que se quedó a la vista no se presenta como vigente.
 async function comprobarCorrida() {
-  const trabajo = RAPIDO; if (!trabajo || (ULTIMA && ULTIMA.estado === 'corriendo')) return;
-  try { const t = await api('trabajo/' + trabajo); if (trabajo !== RAPIDO) return; mensaje('#rap-estado', '', ''); pintarCorrida(t); }
-  catch (err) {
-    if (trabajo !== RAPIDO) return;
+  const trabajo = RAPIDO, consulta = ++CONSULTA;
+  if (!trabajo || (ULTIMA && ULTIMA.estado === 'corriendo')) return null;
+  try {
+    const t = await api('trabajo/' + trabajo);
+    if (trabajo !== RAPIDO || consulta !== CONSULTA) return null;
+    mensaje('#rap-estado', '', ''); pintarCorrida(t); return t;
+  } catch (err) {
+    if (trabajo !== RAPIDO || consulta !== CONSULTA) return null;
+    VIGENTE = false;
     $('#rap-franja').classList.add('caduco');
-    mensaje('#rap-estado', 'error', 'No se pudo comprobar el estado de la corrida (' + err.message + '). Lo que se ve abajo es de la última comprobación' +
-      (COMPROBADO ? ', a las ' + COMPROBADO.toLocaleTimeString('es', {hour: '2-digit', minute: '2-digit'}) : '') + ', y puede haber cambiado.');
+    for (const sel of ['#rap-f-proceso', '#rap-f-revision', '#rap-f-paquete']) celdaFranja(sel, 'neutro', 'espera', 'Sin comprobar', 'El último resultado es histórico.');
+    if (ULTIMA && ULTIMA.situacion) pintarResumen(ULTIMA, ULTIMA.situacion);
+    pintarAvanceCorrida(AVANCE_CORRIDA);
+    mensaje('#rap-estado', 'error', 'No se pudo comprobar el estado de la corrida (' + err.message + '). El resumen es histórico y puede haber cambiado.');
     botonReintentar('#rap-estado', 'Volver a comprobar', comprobarCorrida);
+    return null;
   }
 }
 function pintarAvanceCorrida(p) {
@@ -3673,9 +3739,11 @@ function pintarAvanceCorrida(p) {
     document.querySelectorAll('#rap-series button').forEach((b, j) => { const x = (p.series || [])[j]; if (!x) return; b.querySelector('.avance').textContent = x.mostrados + ' de ' + x.total + ' mostrados'; b.querySelector('.barra i').style.width = (x.total ? Math.round(100 * x.mostrados / x.total) : 0) + '%'; });
   } else { texto('#rap-progreso', ''); $('#rap-barra').style.width = '0%'; }
   const b = $('#btn-rap-revision'), sinVerificar = ULTIMA && ULTIMA.situacion && ULTIMA.situacion.revision.estado === 'no_verificable';
-  b.disabled = BLOQUEO_REVISION || !completo;
+  b.disabled = REGISTRANDO || !VIGENTE || BLOQUEO_REVISION || !completo;
   let porque = '';
-  if (sinVerificar) porque = 'Deshabilitado hasta que el estado de las retiradas se pueda verificar.';
+  if (REGISTRANDO) porque = 'Registrando la revisión y publicando el zip…';
+  else if (!VIGENTE) porque = 'Vuelve a comprobar el estado antes de declarar.';
+  else if (sinVerificar) porque = 'Deshabilitado hasta que el estado de las retiradas se pueda verificar.';
   else if (BLOQUEO_REVISION) porque = 'Hay imágenes que el visor no puede mostrar; no se puede registrar una revisión sin verlas.';
   else if (p && !completo) { const faltan = (p.series || []).filter(x => x.mostrados < x.total).map(x => (x.total - x.mostrados) + ' de la serie ' + ((CORRIDA.series[x.indice] || {}).modalidad || (x.indice + 1)));
     porque = 'El botón se habilita cuando los ' + p.total + ' cuadros hayan estado en pantalla. Faltan ' + (p.total - p.mostrados) + (faltan.length ? ': ' + faltan.join(', ') : '') + '.'; }
@@ -3683,11 +3751,13 @@ function pintarAvanceCorrida(p) {
   b.title = porque; texto('#rap-porque', porque);
 }
 $('#btn-rap-origen').onclick = async () => { const r = await api('elegir-carpeta', {para: 'origen'}); if (r.ruta) $('#rap-origen').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
-$('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) $('#rap-destino').value = r.ruta; else mensaje('#rap-estado', 'aviso', r.mensaje); };
+const avisarDestinoFijado = () => { if (RAPIDO) mensaje('#rap-estado', 'aviso', 'El destino de la corrida actual no cambia. Pulsa Anonimizar carpeta para iniciar otra corrida con el nuevo destino.'); };
+$('#rap-destino').addEventListener('change', avisarDestinoFijado);
+$('#btn-rap-destino').onclick = async () => { const r = await api('elegir-carpeta', {para: 'destino'}); if (r.ruta) { $('#rap-destino').value = r.ruta; avisarDestinoFijado(); } else mensaje('#rap-estado', 'aviso', r.mensaje); };
 $('#btn-rapido').onclick = async () => {
   const origen = $('#rap-origen').value.trim();
   if (!origen) { mensaje('#rap-estado', 'aviso', 'Elige o escribe la carpeta del estudio.'); return; }
-  $('#btn-rapido').disabled = true; ABIERTOS.clear(); ULTIMA = null; AVANCE_CORRIDA = null;
+  $('#btn-rapido').disabled = true; ABIERTOS.clear(); ULTIMA = null; AVANCE_CORRIDA = null; VIGENTE = false; CONSULTA++;
   for (const sel of ['#rap-franja', '#rap-area-resumen', '#rap-area-proceso', '#rap-area-revision', '#rap-area-paquete', '#rap-visor', '#rap-revision']) $(sel).classList.add('oculto');
   $('#rap-pasos').textContent = '';
   const inicio = Date.now(); const reloj = () => { const s = Math.round((Date.now() - inicio) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
@@ -3716,13 +3786,19 @@ $('#btn-rapido').onclick = async () => {
 $('#btn-rap-revision').onclick = async () => {
   const revisor = $('#rap-revisor').value.trim(), trabajo = RAPIDO;
   if (!revisor) { texto('#rap-porque', 'Escribe tu nombre antes de declarar.'); $('#rap-revisor').focus(); return; }
-  $('#btn-rap-revision').disabled = true; texto('#rap-porque', 'Registrando la revisión y publicando el zip…');
+  if (REGISTRANDO || !VIGENTE) return;
+  REGISTRANDO = true; pintarAvanceCorrida(AVANCE_CORRIDA);
   let fallo = null;
   try { await api('rapido/revision', {trabajo, revisor}); } catch (err) { fallo = err; }
+  const t = trabajo === RAPIDO ? await comprobarCorrida() : null;
+  REGISTRANDO = false;
   if (trabajo !== RAPIDO) return;
-  await comprobarCorrida(); pintarAvanceCorrida(AVANCE_CORRIDA);
-  // El motivo exacto que dio el servidor se conserva a la vista, además de lo que muestren los apartados de abajo.
-  if (fallo) mensaje('#rap-estado', 'error', 'La revisión no se registró. ' + fallo.message);
+  pintarAvanceCorrida(AVANCE_CORRIDA);
+  if (fallo) {
+    if (t && t.revisado) mensaje('#rap-estado', 'aviso', 'La respuesta inicial no llegó correctamente. La consulta posterior confirma que la publicación ocurrió; consulta su estado actual abajo.');
+    else if (t && t.situacion && t.situacion.revision.estado === 'pendiente') mensaje('#rap-estado', 'error', 'La revisión sigue pendiente según la consulta posterior. ' + fallo.message);
+    else mensaje('#rap-estado', 'error', 'No se pudo confirmar el resultado de la solicitud. Vuelve a comprobar antes de repetirla. ' + fallo.message);
+  }
 };
 $('#btn-rap-comprobar').onclick = comprobarCorrida;
 $('#btn-rap-copiar').onclick = async () => {

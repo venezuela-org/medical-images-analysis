@@ -235,3 +235,98 @@ def test_una_corrida_detenida_no_tiene_ni_revision_ni_paquete(app, tmp_path):
     t = correr(app, vacia, tmp_path / "destino")
     s = app.situacion_de_corrida(t)
     assert s["procesamiento"]["estado"] == "detenido" and s["revision"] == {"estado": "sin_paquete"} and s["paquete"] == {"estado": "no_creado"}
+
+
+@pytest.mark.parametrize('contenido', ['{}', '{"estado":"sin_hallazgos"}', '{"estado":"con_hallazgos","hallazgos":["rostro"]}'])
+def test_un_registro_sustituido_no_acredita_la_revision(app, tmp_path, contenido):
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    mostrar_todo(app, t)
+    app.aplicar_revision_rapido(t, 'Ana')
+    ruta = Path(t['registro_revision'])
+    original = ruta.read_bytes()
+    ruta.write_text(contenido, encoding='utf-8')
+    assert app.situacion_de_corrida(t)['revision']['estado'] == 'registro_no_legible'
+    ruta.write_bytes(original)
+    assert app.situacion_de_corrida(t)['revision']['estado'] == 'registrada'
+
+
+def test_reescribir_un_registro_retirado_no_rehabilita_la_corrida(app, tmp_path):
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    mostrar_todo(app, t)
+    app.aplicar_revision_rapido(t, 'Ana')
+    ruta = Path(t['registro_revision'])
+    original = json.loads(ruta.read_text(encoding='utf-8'))
+    app.retirar_revision('corrida', ruta.name, 'Ana', 'retirada de prueba')
+    ruta.write_text(json.dumps(original, indent=4), encoding='utf-8')
+    s = app.situacion_de_corrida(t)
+    assert s['revision']['estado'] == 'retirada'
+    assert app.leer_revision(t['pacientes'][0])['estado'] == 'retirada'
+    ruta.unlink()
+    assert app.situacion_de_corrida(t)['revision']['estado'] == 'retirada'
+
+
+@pytest.mark.parametrize('revisada', [False, True])
+def test_la_situacion_verifica_el_contenido_del_zip(app, tmp_path, revisada):
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    if revisada:
+        mostrar_todo(app, t)
+        app.aplicar_revision_rapido(t, 'Ana')
+    ruta = Path(t['zip'])
+    original = ruta.read_bytes()
+    ruta.write_bytes(b'otro archivo, sin imagenes ni manifiesto')
+    s = app.situacion_de_corrida(t)
+    assert s['paquete']['estado'] == 'modificado'
+    assert s['paquete']['es_el_mismo_archivo'] is False
+    ruta.write_bytes(original)
+    assert app.situacion_de_corrida(t)['paquete']['estado'] == ('publicado' if revisada else 'pendiente_local')
+
+
+def test_zip_ilegible_no_se_confunde_con_un_zip_verificado(app, tmp_path, monkeypatch):
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    real = app.sha256_archivo
+    def ilegible(ruta):
+        if Path(ruta) == Path(t['zip']):
+            raise PermissionError('prueba')
+        return real(ruta)
+    monkeypatch.setattr(app, 'sha256_archivo', ilegible)
+    assert app.situacion_de_corrida(t)['paquete']['estado'] == 'no_comprobable'
+
+
+def test_la_confirmacion_elimina_el_aviso_sin_borrar_la_evidencia(app, tmp_path, monkeypatch):
+    import re
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    mostrar_todo(app, t)
+    real = app.os.replace
+    def sin_confirmar(a, b):
+        if re.fullmatch(r'revision_rapido_\d{8}_\d{6}_[0-9a-f]{4}\.json', Path(b).name):
+            raise OSError('sin permiso')
+        return real(a, b)
+    with monkeypatch.context() as m:
+        m.setattr(app.os, 'replace', sin_confirmar)
+        app.aplicar_revision_rapido(t, 'Ana')
+    s = app.situacion_de_corrida(t)
+    accion, = s['paquete']['acciones_pendientes']
+    assert accion['clase'] == 'evidencia'
+    provisional = Path(accion['ruta'])
+    contenido = provisional.read_bytes()
+    app.confirmar_evidencias_publicadas()
+    s = app.situacion_de_corrida(t)
+    assert s['paquete']['acciones_pendientes'] == []
+    assert s['revision']['registro_provisional'] is False
+    assert provisional.with_name(app.nombre_canonico(provisional.name)).read_bytes() == contenido
+
+
+def test_la_limpieza_pendiente_se_actualiza_sin_tocar_evidencias(app, tmp_path, monkeypatch):
+    t = correr(app, caso(tmp_path), tmp_path / 'destino')
+    mostrar_todo(app, t)
+    pendiente = Path(t['zip'])
+    real = app._eliminar
+    with monkeypatch.context() as m:
+        m.setattr(app, '_eliminar', lambda ruta: False if Path(ruta) == pendiente else real(ruta))
+        app.aplicar_revision_rapido(t, 'Ana')
+    acciones = app.situacion_de_corrida(t)['paquete']['acciones_pendientes']
+    assert [a['clase'] for a in acciones] == ['limpieza']
+    assert acciones[0]['ruta'] == str(pendiente)
+    pendiente.unlink()
+    assert app.situacion_de_corrida(t)['paquete']['acciones_pendientes'] == []
+    assert Path(t['registro_revision']).is_file()
