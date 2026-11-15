@@ -1058,11 +1058,13 @@ def solo_cambian_descripciones(existente: Path, nuevos_bytes: bytes) -> bool:
                     for item in e.value:
                         sin_descripciones(item)
 
-        habia = any(e.keyword in TEXTO_REVISADO for d in (ds_e, ds_n) for e in d.iterall())
+        presentes = [any(e.keyword in TEXTO_REVISADO for e in d.iterall()) for d in (ds_e, ds_n)]
+        if presentes[0] == presentes[1]:
+            return False  # dos textos distintos con la misma opción no son un cambio de casilla
         sin_descripciones(ds_e)
         sin_descripciones(ds_n)
         ds_e.file_meta.ImplementationVersionName = ds_n.file_meta.get("ImplementationVersionName", "")
-        return habia and canonico(ds_e) == canonico(ds_n)
+        return canonico(ds_e) == canonico(ds_n)
     except Exception:
         return False
 
@@ -1149,6 +1151,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     cuarentena: list[dict] = []
     omitidos: Counter = Counter()
     escritos = duplicados = actualizados = ya_anonimizados = 0
+    redacciones_aceptadas: dict[str, int] = {}  # solo salidas aceptadas, sin contar una salida dos veces
     aceptados: list[str] = []          # salidas limpias de ESTA invocación: escritas, actualizadas o duplicados verificados
     # ruta limpia → lo que sus originales dicen de edad y sexo (sin fechas). Es una LISTA: dos originales distintos pueden
     # dar el mismo archivo limpio (la fecha de nacimiento se vacía al limpiar) y decir edades o sexos distintos; se guardan
@@ -1233,6 +1236,8 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     os.unlink(tmp)
                     indice.anotar(ruta_salida, ruta, entrada)   # el duplicado verificado también queda indexado
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                        redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
                     anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 if solo_cambia_version(ruta_salida, nuevos_bytes):
@@ -1241,6 +1246,8 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     actualizados += 1
                     indice.anotar(ruta_salida, ruta, entrada)
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                        redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
                     anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 # Se dice por qué: no es lo mismo otra copia de la imagen que la misma imagen limpiada antes con la otra
@@ -1256,6 +1263,8 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
             os.chmod(ruta_salida, 0o600)
             indice.anotar(ruta_salida, ruta, entrada)
             aceptados.append(ruta_salida.relative_to(salida).as_posix())
+            redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
             anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
             posverif["limpios / clean"] += 1
             escritos += 1
@@ -1283,6 +1292,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
         "acciones": dict(sorted(acciones.items())), "verificacion_posterior": dict(posverif),
         "cuantificacion_pet": dict(suv), "problemas_restantes": sorted(set(problemas_restantes)),
         "avisos": sorted(set(avisos)),
+        "descripciones_redactadas_aceptadas": sum(redacciones_aceptadas.values()),
     }
     if getattr(args, "lista_salida", None):
         # Lista exacta de las salidas limpias que corresponden a los archivos de entrada de ESTA invocación

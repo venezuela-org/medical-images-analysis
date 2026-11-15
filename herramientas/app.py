@@ -1374,14 +1374,13 @@ def datos_de_limpieza(rels: list[str] | None = None) -> dict:
     cuarentena = r.get("cuarentena") if isinstance(r.get("cuarentena"), list) else None
     motivos = Counter(str(c.get("motivo") or "sin motivo anotado") for c in (cuarentena or []) if isinstance(c, dict))
     aceptados = len(rels) if rels is not None else sum(entero(r.get(k)) or 0 for k in ("archivos_escritos", "duplicados_omitidos", "actualizados_version"))
-    avisos = [str(x) for x in r.get("avisos") or []] if isinstance(r.get("avisos"), list) else []
     return {"leidos": entero(r.get("archivos_leidos")), "en_la_corrida": aceptados, "escritos": entero(r.get("archivos_escritos")),
             "ya_guardados": entero(r.get("duplicados_omitidos")), "actualizados": entero(r.get("actualizados_version")),
             "omitidos": omitidos, "omitidos_total": sum(omitidos.values()) if isinstance(r.get("archivos_omitidos"), dict) else None,
             "cuarentena_total": len(cuarentena) if cuarentena is not None else None, "cuarentena_motivos": dict(motivos),
             "pacientes": len({x.split("/")[0] for x in rels}) if rels is not None else entero(r.get("pacientes")),
             "conservar_descripciones": r.get("conservar_descripciones") if isinstance(r.get("conservar_descripciones"), bool) else None,
-            "descripciones_redactadas": sum(1 for x in avisos if "se redactó" in x)}
+            "descripciones_redactadas": entero(r.get("descripciones_redactadas_aceptadas"))}
 
 
 def _rapido(tid: str, origen: Path, destino: Path, prefijo: str) -> None:
@@ -3910,7 +3909,7 @@ function explicarLimpieza(d, conservar) {
       ['Qué puedes hacer', 'El reporte de la limpieza, aquí abajo, dice cuántas son por motivo.'],
     ]));
   }
-  // solo si esta limpieza guardó o verificó algo: lo que quedó en cuarentena no se conserva, con redacción o sin ella
+  // El contador procede solo de salidas aceptadas; los avisos de archivos en cuarentena no acreditan conservación.
   if (d.descripciones_redactadas && d.en_la_corrida) zona.appendChild(cajaAviso('aviso', 'Se redactó el nombre o el ID del paciente en una descripción', [
     ['Qué pasó', 'Alguna descripción conservada contenía el nombre o el ID del paciente, y esa parte se sustituyó por [REDACTADO].'],
     ['A qué afecta', 'Esas descripciones se conservan con la parte redactada. Lo demás no cambia.'],

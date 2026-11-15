@@ -47,3 +47,5 @@ Esto reproduce la secuencia que se describió y da el mismo mensaje. No se ha vi
 ## Lo que todavía no se puede hacer
 
 Cambiar la opción en un estudio ya guardado. Hacerlo significa sustituir los archivos limpios, y con ellos cambian sus hashes: las revisiones de píxeles de ese paciente volverían a estar pendientes y los paquetes ya hechos dejarían de corresponder a lo guardado. Es una decisión de quienes llevan el proyecto, y no está tomada.
+
+Los avisos distinguen además una descripción cambiada en el origen, conservada con la misma casilla, de un cambio de opción: la primera es contenido distinto. El aviso de textos conservados con `[REDACTADO]` solo cuenta salidas aceptadas (nuevas, actualizadas o duplicados verificados). Los avisos del reporte sobre intentos que acabaron en cuarentena no acreditan que esos textos estén guardados.

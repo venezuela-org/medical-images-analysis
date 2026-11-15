@@ -358,6 +358,18 @@ def main() -> int:
                 pag.click("#rap-estado button.reintentar")
                 expect(pag.locator("#rap-franja")).not_to_have_class(re.compile(r"\bcaduco\b"), timeout=20000)
                 ok(True, "sin respuesta al volver a comprobar: el estado mostrado se marca como sin comprobar y se recupera al responder")
+                # Los avisos de redacción solo acreditan salidas aceptadas, no otros archivos de la misma limpieza.
+                pag.click("nav.pestanas button[data-tab=entrada]")
+                mixto = {"leidos": 6, "en_la_corrida": 5, "ya_guardados": 5, "escritos": 0,
+                         "cuarentena_total": 1, "cuarentena_motivos": {"misma instancia SOP con contenido distinto": 1},
+                         "descripciones_redactadas": 0}
+                pag.evaluate("d => explicarLimpieza(d, true)", mixto)
+                expect(pag.locator("#explicacion-anon")).to_contain_text("con otro contenido")
+                expect(pag.locator("#explicacion-anon")).not_to_contain_text("Esas descripciones se conservan")
+                mixto["descripciones_redactadas"] = 1
+                pag.evaluate("d => explicarLimpieza(d, true)", mixto)
+                expect(pag.locator("#explicacion-anon")).to_contain_text("Esas descripciones se conservan")
+                ok(True, "Entrada: la conservación de texto redactado solo se anuncia para salidas aceptadas")
                 nav.close()
         finally:
             proc.terminate()

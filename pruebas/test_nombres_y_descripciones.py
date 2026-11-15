@@ -333,3 +333,53 @@ def test_una_carpeta_sin_imagenes_sigue_diciendo_lo_de_siempre(app, tmp_path):
     (vacia / "notas.txt").write_text("nada que anonimizar")
     t = correr(app, vacia, tmp_path / "destino", "a")
     assert t["estado"] == "error" and t["zip"] is None
+
+
+def test_descripciones_cambiadas_con_la_misma_casilla_son_otro_contenido(tmp_path):
+    origen = caso(tmp_path, "A", editar=con_protocolo)
+    trabajo = tmp_path / "trabajo"
+    assert limpiar(origen, trabajo, "--conservar-descripciones")[0] == 0
+    guardado = {f: f.read_bytes() for f in (trabajo / "limpios").rglob("*.dcm")}
+    for f in origen.rglob("IM*"):
+        ds = pydicom.dcmread(f)
+        ds.ProtocolName = "CEREBRO CONTROL"
+        ds.save_as(f, enforce_file_format=True)
+    codigo, reporte = limpiar(origen, trabajo, "--conservar-descripciones")
+    assert codigo == 1 and len(reporte["cuarentena"]) == 6
+    assert {c["motivo"] for c in reporte["cuarentena"]} == {anon.MOTIVO_OTRO_CONTENIDO}
+    assert {f: f.read_bytes() for f in (trabajo / "limpios").rglob("*.dcm")} == guardado
+
+
+def test_redacciones_en_cuarentena_no_se_atribuyen_a_archivos_aceptados(app, tmp_path):
+    origen = caso(tmp_path, "A", editar=con_protocolo)
+    assert limpiar(origen, app.TRABAJO, "--conservar-descripciones")[0] == 0
+    guardado = {f: f.read_bytes() for f in (app.TRABAJO / "limpios").rglob("*.dcm")}
+    f = next(origen.rglob("IM*"))
+    ds = pydicom.dcmread(f)
+    ds.SeriesDescription = "control HC-778899"
+    pixeles = bytearray(ds.PixelData)
+    pixeles[0] ^= 0xFF
+    ds.PixelData = bytes(pixeles)
+    ds.save_as(f, enforce_file_format=True)
+    codigo, reporte = limpiar(origen, app.TRABAJO, "--conservar-descripciones")
+    assert codigo == 1 and reporte["duplicados_omitidos"] == 5 and len(reporte["cuarentena"]) == 1
+    assert any("se redactó" in a for a in reporte["avisos"])
+    assert app.datos_de_limpieza()["en_la_corrida"] == 5
+    assert app.datos_de_limpieza()["descripciones_redactadas"] == 0
+    assert {f: f.read_bytes() for f in (app.TRABAJO / "limpios").rglob("*.dcm")} == guardado
+
+
+def test_redacciones_aceptadas_se_cuentan_al_guardar_y_verificar_duplicados(app, tmp_path):
+    origen = caso(tmp_path, "A")  # el nombre sintético figura en StudyDescription
+    for duplicados in (0, 6):
+        codigo, reporte = limpiar(origen, app.TRABAJO, "--conservar-descripciones")
+        assert codigo == 0 and reporte["duplicados_omitidos"] == duplicados
+        assert app.datos_de_limpieza()["descripciones_redactadas"] > 0
+
+
+def test_reporte_antiguo_no_infiere_redacciones_aceptadas(app):
+    reportes = app.carpeta_reportes()
+    reportes.mkdir(parents=True)
+    (reportes / "ultimo_reporte.json").write_text(json.dumps({
+        "archivos_escritos": 1, "avisos": ["se redactó una descripción"]}), encoding="utf-8")
+    assert app.datos_de_limpieza()["descripciones_redactadas"] is None
