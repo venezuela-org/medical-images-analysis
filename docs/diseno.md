@@ -41,6 +41,18 @@ Tres cosas distintas que nunca deben confundirse, y cada una tiene su propia fra
 
 Por eso los mensajes de la compuerta terminan con "esto no es la revisión de píxeles", y los paquetes con revisión pendiente llevan un aviso en la interfaz y en el manifiesto.
 
+## La pestaña Rápido (v0.10.0)
+
+Una columna y tres apartados en orden: procesamiento, revisión de píxeles y paquete. Lo que termina bien en uno no se presenta como éxito de los otros.
+
+- **Franja de estados** (`.franja`): tres celdas con qué es, cómo está y un detalle. El borde izquierdo toma el color del estado; el texto y el icono lo dicen sin depender del color. Con `.caduco` indica que el estado no se pudo volver a comprobar.
+- **Libro de pasos** (`.libro`, `.paso-fila`): una fila por paso, hecha con `details`, que se abre con el ratón o con Intro y Espacio. Número, nombre, estado, frase, cifra y detalle.
+- **Caja de aviso** (`.caja-aviso`): para avisos y bloqueos. Siempre responde a tres preguntas: qué pasó, a qué afecta y qué puedes hacer. Solo ofrece acciones que la aplicación tiene.
+- **Resumen** (`.resumen`): tres columnas con lo que consta de la corrida. El texto que se copia sale de una lista cerrada de campos.
+- **Barra** (`.barra`): solo para cantidades que la aplicación mide, como los cuadros mostrados. El proceso no lleva barra ni porcentaje.
+
+El verde describe el resultado concreto junto al que aparece; el ámbar, un aviso o algo pendiente; el rojo, un fallo o un bloqueo. Sin animaciones. Por debajo de 980 px todo pasa a una columna.
+
 ## Para las próximas herramientas
 
 Etiquetado y anotación de imágenes, segmentación con corrección experta y resaltado de regiones candidatas usarán los mismos tokens, y dos reglas más:

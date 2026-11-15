@@ -616,7 +616,7 @@ def test_un_pet_en_cuarentena_no_cuenta_como_faltante_en_el_suv_de_la_corrida(ap
     assert len(t["archivos"]) == 2 * N - 1 and t["zip"]
     # sin conjunto, la comparación general sigue viendo la serie original entera y marca el faltante
     suv = cargar("suv_herramienta", RAIZ / "herramientas" / "suv.py")
-    serie_pet = next(app.TRABAJO / "limpios" / s["serie"] for s in t["series_corrida"] if s["modalidad"] == "PT")
+    serie_pet = next(app.TRABAJO / "limpios" / s["serie_interna"] for s in t["series_corrida"] if s["modalidad"] == "PT")
     informe = app.TRABAJO / "suv_general.json"
     codigo = suv.main(["comparar", str(serie_pet), "--privado", str(app.TRABAJO / "limpios_PRIVADO"), "--json", str(informe)])
     r = json.loads(informe.read_text(encoding="utf-8"))

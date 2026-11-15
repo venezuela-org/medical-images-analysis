@@ -73,7 +73,7 @@ from pydicom.uid import PYDICOM_IMPLEMENTATION_UID, UID  # noqa: E402
 
 pydicom.config.convert_wrong_length_to_UN = True  # elementos privados mal formados no detienen la corrida
 
-VERSION = "0.4.10"
+VERSION = "0.4.11"
 POLITICA = "pet-ct-local/0.4"
 RAIZ_UID = "1.2.826.0.1.3680043.8.498."     # raíz pydicom, libre de uso; identifica los UID reescritos
 DICOM_ROOT = "1.2.840.10008"
@@ -1036,6 +1036,39 @@ def solo_cambia_version(existente: Path, nuevos_bytes: bytes) -> bool:
         return False
 
 
+MOTIVO_OTRO_CONTENIDO = "misma instancia SOP con contenido distinto / same SOP instance, different content"
+MOTIVO_OTRA_OPCION = ("misma instancia, ya guardada con la otra opción de descripciones / "
+                      "same instance, already stored with the other descriptions option")
+
+
+def solo_cambian_descripciones(existente: Path, nuevos_bytes: bytes) -> bool:
+    """¿El archivo guardado y el nuevo son la misma imagen limpia y difieren solo en los textos que la opción
+    --conservar-descripciones decide (TEXTO_REVISADO) y, si acaso, en el nombre de versión de la herramienta?
+    Es un diagnóstico: sirve para decir por qué la imagen nueva no se guardó. No autoriza a sustituir nada."""
+    try:
+        import io
+        ds_e = pydicom.dcmread(io.BytesIO(existente.read_bytes()), force=True)
+        ds_n = pydicom.dcmread(io.BytesIO(nuevos_bytes), force=True)
+
+        def sin_descripciones(d: Dataset) -> None:
+            for e in list(d):
+                if e.keyword in TEXTO_REVISADO:
+                    del d[e.tag]
+                elif str(e.VR) == "SQ":
+                    for item in e.value:
+                        sin_descripciones(item)
+
+        presentes = [any(e.keyword in TEXTO_REVISADO for e in d.iterall()) for d in (ds_e, ds_n)]
+        if presentes[0] == presentes[1]:
+            return False  # dos textos distintos con la misma opción no son un cambio de casilla
+        sin_descripciones(ds_e)
+        sin_descripciones(ds_n)
+        ds_e.file_meta.ImplementationVersionName = ds_n.file_meta.get("ImplementationVersionName", "")
+        return canonico(ds_e) == canonico(ds_n)
+    except Exception:
+        return False
+
+
 class IndiceOrigen:
     """Índice PRIVADO limpio → original (y la carpeta de entrada), una línea JSON por archivo, sin repetidos.
     Permite el panel antes/después de la app y la ejecución de cotejar desde ella."""
@@ -1118,6 +1151,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     cuarentena: list[dict] = []
     omitidos: Counter = Counter()
     escritos = duplicados = actualizados = ya_anonimizados = 0
+    redacciones_aceptadas: dict[str, int] = {}  # solo salidas aceptadas, sin contar una salida dos veces
     aceptados: list[str] = []          # salidas limpias de ESTA invocación: escritas, actualizadas o duplicados verificados
     # ruta limpia → lo que sus originales dicen de edad y sexo (sin fechas). Es una LISTA: dos originales distintos pueden
     # dar el mismo archivo limpio (la fecha de nacimiento se vacía al limpiar) y decir edades o sexos distintos; se guardan
@@ -1202,6 +1236,8 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     os.unlink(tmp)
                     indice.anotar(ruta_salida, ruta, entrada)   # el duplicado verificado también queda indexado
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                        redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
                     anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
                 if solo_cambia_version(ruta_salida, nuevos_bytes):
@@ -1210,10 +1246,15 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
                     actualizados += 1
                     indice.anotar(ruta_salida, ruta, entrada)
                     aceptados.append(ruta_salida.relative_to(salida).as_posix())
+                    redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                        redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
                     anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
                     continue
+                # Se dice por qué: no es lo mismo otra copia de la imagen que la misma imagen limpiada antes con la otra
+                # opción de descripciones. En los dos casos la copia guardada se queda como está.
+                motivo = MOTIVO_OTRA_OPCION if solo_cambian_descripciones(ruta_salida, nuevos_bytes) else MOTIVO_OTRO_CONTENIDO
                 os.unlink(tmp)
-                cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": "misma instancia SOP con contenido distinto / same SOP instance, different content"})
+                cuarentena.append({"archivo": hash_corto(nombre_rel, 8), "motivo": motivo})
                 # El original no se copia, pero lo que dice de la edad y el sexo sí cuenta: es otro registro de la misma
                 # instancia, y si discrepa del ya guardado el estudio debe mostrar el conflicto.
                 anotar_observacion(demografia_en_conflicto, ruta_salida.relative_to(salida).as_posix(), observacion)
@@ -1222,6 +1263,8 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
             os.chmod(ruta_salida, 0o600)
             indice.anotar(ruta_salida, ruta, entrada)
             aceptados.append(ruta_salida.relative_to(salida).as_posix())
+            redacciones_aceptadas[ruta_salida.relative_to(salida).as_posix()] = max(
+                redacciones_aceptadas.get(ruta_salida.relative_to(salida).as_posix(), 0), sum("se redactó" in a for a in avisos_arch))
             anotar_observacion(demografia_nueva, ruta_salida.relative_to(salida).as_posix(), observacion)
             posverif["limpios / clean"] += 1
             escritos += 1
@@ -1242,6 +1285,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
     reporte = {
         "version": VERSION, "politica": POLITICA, "prefijo": args.prefijo,
         "conservar_descripciones": bool(args.conservar_descripciones),
+        "id_corrida": getattr(args, "id_corrida", None),
         "fecha_ejecucion": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "archivos_leidos": len(archivos), "archivos_escritos": escritos, "duplicados_omitidos": duplicados,
         "actualizados_version": actualizados, "ya_anonimizados": ya_anonimizados,
@@ -1249,6 +1293,7 @@ def _limpiar(args: argparse.Namespace, entrada: Path, salida: Path) -> int:
         "acciones": dict(sorted(acciones.items())), "verificacion_posterior": dict(posverif),
         "cuantificacion_pet": dict(suv), "problemas_restantes": sorted(set(problemas_restantes)),
         "avisos": sorted(set(avisos)),
+        "descripciones_redactadas_aceptadas": sum(redacciones_aceptadas.values()),
     }
     if getattr(args, "lista_salida", None):
         # Lista exacta de las salidas limpias que corresponden a los archivos de entrada de ESTA invocación
@@ -1416,6 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("salida")
     a.add_argument("--mapa", help="ruta del mapa privado (private map path)")
     a.add_argument("--prefijo", default="ANON", help="prefijo de seudónimo, letras y dígitos (pseudonym prefix)")
+    a.add_argument("--id-corrida", help="identificador de la invocación para vincular su reporte")
     a.add_argument("--lista-salida", help="escribe aquí (JSON) las rutas limpias exactas que produjo o verificó esta invocación")
     a.add_argument("--conservar-descripciones", action="store_true",
                    help="conservar descripciones de estudio y serie y protocolo, revisadas contra nombre e ID (keep descriptions)")
